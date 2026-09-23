@@ -1,50 +1,32 @@
-# apple_set_os loader + T2 gmux iGPU + dGPU power off
+# apple_set_os loader + T2 gmux / dGPU / NVRAM
 
-UEFI loader that:
-1. Calls AppleSetOs (unlock iGPU for non-macOS)
-2. Switches gmux panel route to iGPU (`0x10`)
-3. Powers **OFF** the dGPU rail via gmux port `0x50` (same sequence as Linux)
-4. Writes NVRAM `gpu-power-prefs=01 00 00 00` (firmware boot GPU = iGPU)
-
-Runs in Boot Services before Windows. Based on 0xbb / aa15032261 apple_set_os loader.
-
-## WARNING
-
-- After dGPU rail OFF from this loader, **do not** power the Radeon back on from Windows
-  (`gmux power on` / enable after hard power-cut). That path hung MacBookPro16,1 (CATERR).
-- Recovery = boot with **D** (writes `gpu-power-prefs=dGPU`) or NVRAM reset, then normal dGPU boot.
-- First test with RDP/SSH available.
+UEFI loader (Boot Services, before Windows).
 
 ## Keys during countdown
 
-| Key | Action |
-|-----|--------|
-| **Z** | Skip AppleSetOs |
-| **X** | Skip gmux + dGPU power off + NVRAM |
-| **R** | Panel -> iGPU only (Radeon stays powered, no NVRAM) |
-| **D** | **Recovery**: write `gpu-power-prefs=dGPU`, skip gmux this boot |
-| other | Continue with full path (default) |
+| Key | mux panel→iGPU | dGPU rail OFF | NVRAM |
+|-----|----------------|---------------|-------|
+| *(default)* | no | no | — |
+| **Z** | — | — | skip AppleSetOs |
+| **X** | yes | yes | — |
+| **V** | yes | no | — |
+| **C** | no | **yes** | — |
+| **R** | no | no | **dGPU only** |
+| **E** | no | no | **iGPU only** |
 
-## Default path (no key)
+## WARNING
 
-1. AppleSetOs
-2. gmux panel -> iGPU
-3. gmux discrete power -> OFF
-4. NVRAM gpu-power-prefs -> iGPU
-5. chainload `bootx64_original.efi`
+- After dGPU rail OFF (**X** or **C**), do **not** power Radeon back on from Windows.
+- **C** (rail off without mux switch) will black the panel if firmware still routes display through dGPU — use only if you know why.
+- Recovery NVRAM: press **R**, reboot.
 
-## Install
+## Install / build
 
-1. Secure Boot = No Security
-2. Mount EFI
-3. Rename `/EFI/Boot/bootx64.efi` -> `bootx64_original.efi`
-4. Copy built `bootx64.efi` to `/EFI/Boot/`
-
-## Build
+1. Secure Boot = No Security  
+2. Rename `/EFI/Boot/bootx64.efi` → `bootx64_original.efi`  
+3. Copy built `bootx64.efi` to `/EFI/Boot/`  
 
 ```bash
 docker build -t apple_set_os_loader .
 docker run --rm -v "$(pwd):/build" apple_set_os_loader make clean all
 ```
-
-GitHub Actions builds artifact on push (see `.github/workflows/build.yml`).

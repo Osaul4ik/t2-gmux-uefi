@@ -441,13 +441,18 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         );
     }
 
-    // Gmux: panel -> iGPU, optionally power off dGPU + set gpu-power-prefs.
-    // X = skip all gmux / power / NVRAM
-    // R = panel switch only (keep Radeon powered, no NVRAM write)
-    // D = write gpu-power-prefs=0 (dGPU) for recovery, then still can skip with X next boot
-    BOOLEAN DoGmuxSwitch = TRUE;
-    BOOLEAN DoDgpuPowerOff = TRUE;
-    BOOLEAN DoGpuPowerPrefs = TRUE;
+    // Keys (after countdown):
+    //   Z = skip AppleSetOs
+    //   X = gmux panel->iGPU + dGPU rail OFF (no NVRAM)
+    //   V = gmux panel->iGPU only (Radeon stays powered, no NVRAM)
+    //   C = rail OFF only (mux not changed)
+    //   R = NVRAM gpu-power-prefs = dGPU only
+    //   E = NVRAM gpu-power-prefs = iGPU only
+    // Default (no key): no mux change, no rail change, no NVRAM
+    BOOLEAN DoGmuxSwitch = FALSE;
+    BOOLEAN DoDgpuPowerOff = FALSE;
+    BOOLEAN DoWritePrefsIgd = FALSE;
+    BOOLEAN DoWritePrefsDgpu = FALSE;
 
     if (AppleSetOsHandleCount == 0) {
         _INT_SimpleTextGraphicsPrint(
@@ -457,12 +462,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     } else {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 2, TRUE, TRUE,
-            L"AppleSetOs will be loaded, press Z to disable."
+            L"AppleSetOs ON (Z=skip). Default=no gmux/rail"
         );
     }
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 7, FALSE, TRUE,
-        L"Gmux iGPU+dGPUoff+NVRAM (X=skip all, R=panel only)"
+        L"X=mux+off V=mux C=railOff R/E=NVRAM"
     );
 
 
@@ -582,7 +587,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         }
     }
 
-    // Z = skip AppleSetOs; X = skip all gmux/power/NVRAM; R = panel only
+    // Z / X / V / C / R / E — see UI comments above
     if (Key.UnicodeChar == L'z' || Key.UnicodeChar == L'Z') {
         AppleSetOsHandleCount = 0;
         _INT_SimpleTextGraphicsPrint(
@@ -591,36 +596,47 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         );
     }
     if (Key.UnicodeChar == L'x' || Key.UnicodeChar == L'X') {
-        DoGmuxSwitch = FALSE;
-        DoDgpuPowerOff = FALSE;
-        DoGpuPowerPrefs = FALSE;
+        DoGmuxSwitch = TRUE;
+        DoDgpuPowerOff = TRUE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
-            L"Gmux/power/NVRAM: SKIPPED"
+            L"X: gmux iGPU + dGPU rail OFF (no NVRAM)"
+        );
+    }
+    if (Key.UnicodeChar == L'v' || Key.UnicodeChar == L'V') {
+        DoGmuxSwitch = TRUE;
+        DoDgpuPowerOff = FALSE;
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 7, TRUE, TRUE,
+            L"V: panel->iGPU only (Radeon powered, no NVRAM)"
+        );
+    }
+    if (Key.UnicodeChar == L'c' || Key.UnicodeChar == L'C') {
+        // mux not changed; only rail OFF
+        DoGmuxSwitch = FALSE;
+        DoDgpuPowerOff = TRUE;
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 7, TRUE, TRUE,
+            L"C: dGPU rail OFF only (mux unchanged)"
         );
     }
     if (Key.UnicodeChar == L'r' || Key.UnicodeChar == L'R') {
-        DoDgpuPowerOff = FALSE;
-        DoGpuPowerPrefs = FALSE;
+        // NVRAM only — dGPU; mux/rail left at default (off)
+        DoWritePrefsDgpu = TRUE;
+        DoWritePrefsIgd = FALSE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
-            L"Gmux panel only (Radeon stays powered)"
+            L"R: NVRAM gpu-power-prefs = dGPU only"
         );
     }
-    if (Key.UnicodeChar == L'd' || Key.UnicodeChar == L'D') {
-        // Recovery: force firmware back to dGPU on next boots; skip iGPU path this boot
-        DoGmuxSwitch = FALSE;
-        DoDgpuPowerOff = FALSE;
-        DoGpuPowerPrefs = FALSE;
-        {
-            EFI_STATUS st = SetGpuPowerPrefsDgpu(SystemTable->RuntimeServices);
-            _INT_SimpleTextGraphicsPrint(
-                &gs, 0, 7, TRUE, TRUE,
-                L"RECOVERY: gpu-power-prefs=dGPU %s (%lX)",
-                EFI_ERROR(st) ? L"FAIL" : L"OK",
-                st
-            );
-        }
+    if (Key.UnicodeChar == L'e' || Key.UnicodeChar == L'E') {
+        // NVRAM only — iGPU; mux/rail left at default (off)
+        DoWritePrefsIgd = TRUE;
+        DoWritePrefsDgpu = FALSE;
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 7, TRUE, TRUE,
+            L"E: NVRAM gpu-power-prefs = iGPU only"
+        );
     }
 
     // load apple_set_os
@@ -672,8 +688,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     _INT_FreePool(BS, AppleSetOsHandleBuf);
 
-    // ---- Gmux: panel -> iGPU, optional dGPU rail OFF + gpu-power-prefs ----
-    // Order matches Linux force_igd spirit: route first, then power down unused GPU.
+    // ---- Optional gmux panel switch and/or dGPU rail OFF ----
     // Never power the dGPU rail back on from Windows after OFF (known hang on this HW).
     if (DoGmuxSwitch) {
         _INT_SimpleTextGraphicsPrint(
@@ -692,45 +707,56 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 &gs, 0, 7, TRUE, TRUE,
                 L"Gmux: route FAILED (no gmux?)"
             );
-            DoDgpuPowerOff = FALSE;
         }
+    }
 
-        if (DoDgpuPowerOff) {
+    if (DoDgpuPowerOff) {
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 8, TRUE, TRUE,
+            L"Gmux: powering OFF dGPU rail (0x50)..."
+        );
+        if (GmuxSetDiscretePower(BS, FALSE)) {
             _INT_SimpleTextGraphicsPrint(
                 &gs, 0, 8, TRUE, TRUE,
-                L"Gmux: powering OFF dGPU rail (0x50)..."
+                L"Gmux: dGPU rail OFF OK"
             );
-            if (GmuxSetDiscretePower(BS, FALSE)) {
-                _INT_SimpleTextGraphicsPrint(
-                    &gs, 0, 8, TRUE, TRUE,
-                    L"Gmux: dGPU rail OFF OK"
-                );
-            } else {
-                _INT_SimpleTextGraphicsPrint(
-                    &gs, 0, 8, TRUE, TRUE,
-                    L"Gmux: dGPU rail OFF FAILED"
-                );
-            }
-        }
-
-        if (DoGpuPowerPrefs) {
-            EFI_STATUS st = SetGpuPowerPrefsIgd(SystemTable->RuntimeServices);
+        } else {
             _INT_SimpleTextGraphicsPrint(
-                &gs, 0, 9, TRUE, TRUE,
-                L"NVRAM gpu-power-prefs=iGPU: %s (%lX)",
-                EFI_ERROR(st) ? L"FAIL" : L"OK",
-                st
+                &gs, 0, 8, TRUE, TRUE,
+                L"Gmux: dGPU rail OFF FAILED"
             );
         }
+    }
 
-        for (UINT16 j = 0; j < 120; j++) {
+    if (DoGmuxSwitch || DoDgpuPowerOff) {
+        for (UINT16 j = 0; j < 80; j++) {
             BS->Stall(10000);
         }
-    } else {
+    }
+
+    // NVRAM writes are independent of gmux (keys R / E)
+    if (DoWritePrefsIgd) {
+        EFI_STATUS st = SetGpuPowerPrefsIgd(SystemTable->RuntimeServices);
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"Gmux/power/NVRAM: skipped"
+            &gs, 0, 9, TRUE, TRUE,
+            L"NVRAM gpu-power-prefs=iGPU: %s (%lX)",
+            EFI_ERROR(st) ? L"FAIL" : L"OK",
+            st
         );
+        for (UINT16 j = 0; j < 50; j++) {
+            BS->Stall(10000);
+        }
+    } else if (DoWritePrefsDgpu) {
+        EFI_STATUS st = SetGpuPowerPrefsDgpu(SystemTable->RuntimeServices);
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 9, TRUE, TRUE,
+            L"NVRAM gpu-power-prefs=dGPU: %s (%lX)",
+            EFI_ERROR(st) ? L"FAIL" : L"OK",
+            st
+        );
+        for (UINT16 j = 0; j < 50; j++) {
+            BS->Stall(10000);
+        }
     }
 
     _INT_SimpleTextGraphicsPrint(
