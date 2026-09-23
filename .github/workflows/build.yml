@@ -1,0 +1,80 @@
+name: Build bootx64.efi (apple_set_os + T2 gmux)
+
+on:
+  push:
+    branches: [ master, main ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  IMAGE_NAME: apple_set_os_loader
+
+jobs:
+  build:
+    name: Docker build bootx64.efi
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t "${IMAGE_NAME}" .
+
+      - name: Compile bootx64.efi
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/build" \
+            -w /build \
+            "${IMAGE_NAME}" \
+            make clean all
+
+      - name: Verify artifact
+        run: |
+          set -e
+          test -f bootx64.efi
+          ls -la bootx64.efi
+          file bootx64.efi
+          # PE32+ EFI application for x86-64
+          file bootx64.efi | grep -qiE 'PE32\+|EFI|executable'
+
+      - name: Upload bootx64.efi
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootx64.efi
+          path: bootx64.efi
+          if-no-files-found: error
+          retention-days: 30
+
+  # Optional: attach efi to a GitHub Release when pushing a version tag
+  release:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bootx64.efi
+          path: dist
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/bootx64.efi
+          generate_release_notes: true
+          fail_on_unmatched_files: true
