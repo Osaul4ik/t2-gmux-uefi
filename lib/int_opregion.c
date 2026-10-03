@@ -17,25 +17,19 @@ static BOOLEAN IsVbt(const UINT8* p)
     return p[0] == '$' && p[1] == 'V' && p[2] == 'B' && p[3] == 'T';
 }
 
-EFI_STATUS _INT_InspectIgpuOpRegion(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
-                                    _INT_Rep* R, _INT_VbtInfo* Info)
+
+static EFI_PCI_IO_PROTOCOL* FindIgpu(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                     UINT32* IdOut, EFI_STATUS* StOut)
 {
     EFI_GUID pci_guid = EFI_PCI_IO_PROTOCOL_GUID;
     EFI_HANDLE* Handles = NULL;
     UINTN Count = 0;
-    EFI_STATUS Status;
+    EFI_PCI_IO_PROTOCOL* Found = NULL;
 
-    _INT_memset(Info, 0, sizeof(*Info));
-    Info->PanelType = 0xFF;
+    *StOut = BS->LocateHandleBuffer(ByProtocol, &pci_guid, NULL, &Count, &Handles);
+    if (EFI_ERROR(*StOut))
+        return NULL;
 
-    Status = BS->LocateHandleBuffer(ByProtocol, &pci_guid, NULL, &Count, &Handles);
-    if (EFI_ERROR(Status)) {
-        S("PciIo locate failed: 0x"); HX(Status, 16); NL();
-        return Status;
-    }
-
-    EFI_PCI_IO_PROTOCOL* Igpu = NULL;
-    UINT32 Id = 0;
     for (UINTN i = 0; i < Count; i++) {
         EFI_PCI_IO_PROTOCOL* Pci;
         UINT32 w0 = 0, w8 = 0;
@@ -52,14 +46,30 @@ EFI_STATUS _INT_InspectIgpuOpRegion(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandl
         if ((w8 >> 24) != 3)               // base class: display controller
             continue;
 
-        Igpu = Pci;
-        Id = w0;
+        Found = Pci;
+        *IdOut = w0;
         break;
     }
     _INT_FreePool(BS, Handles);
+    return Found;
+}
 
+EFI_STATUS _INT_InspectIgpuOpRegion(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                    _INT_Rep* R, _INT_VbtInfo* Info)
+{
+    EFI_STATUS Status;
+    UINT32 Id = 0;
+
+    _INT_memset(Info, 0, sizeof(*Info));
+    Info->PanelType = 0xFF;
+
+    EFI_PCI_IO_PROTOCOL* Igpu = FindIgpu(BS, ImageHandle, &Id, &Status);
     if (!Igpu) {
-        S("No Intel display controller found via PciIo"); NL();
+        if (EFI_ERROR(Status)) {
+            S("PciIo locate failed: 0x"); HX(Status, 16); NL();
+        } else {
+            S("No Intel display controller found via PciIo"); NL();
+        }
         return EFI_NOT_FOUND;
     }
 
@@ -200,4 +210,144 @@ EFI_STATUS _INT_WriteEspFile(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
     if (!EFI_ERROR(Status) && Len != Size)
         Status = EFI_DEVICE_ERROR;
     return Status;
+}
+
+EFI_STATUS _INT_ReadEspFile(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                            CHAR16* Name, VOID** Data, UINTN* Size)
+{
+    EFI_GUID li_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_GUID fs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    EFI_LOADED_IMAGE_PROTOCOL* Li = NULL;
+    EFI_FILE_IO_INTERFACE* Fs = NULL;
+    EFI_FILE_HANDLE Root = NULL, File = NULL;
+    EFI_STATUS Status;
+    UINT64 Len = 0;
+
+    *Data = NULL;
+    *Size = 0;
+
+    Status = BS->HandleProtocol(ImageHandle, &li_guid, (VOID**)&Li);
+    if (EFI_ERROR(Status) || !Li) return EFI_NOT_FOUND;
+    Status = BS->HandleProtocol(Li->DeviceHandle, &fs_guid, (VOID**)&Fs);
+    if (EFI_ERROR(Status) || !Fs) return EFI_NOT_FOUND;
+    Status = Fs->OpenVolume(Fs, &Root);
+    if (EFI_ERROR(Status)) return Status;
+
+    Status = Root->Open(Root, &File, Name, EFI_FILE_MODE_READ, 0);
+    if (EFI_ERROR(Status)) {
+        Root->Close(Root);
+        return Status;
+    }
+
+    // file size: seek to end, read position, seek back
+    File->SetPosition(File, 0xFFFFFFFFFFFFFFFFULL);
+    File->GetPosition(File, &Len);
+    File->SetPosition(File, 0);
+
+    if (Len == 0 || Len > 0x100000) {
+        File->Close(File);
+        Root->Close(Root);
+        return EFI_BAD_BUFFER_SIZE;
+    }
+
+    VOID* Buf = _INT_AllocatePool(BS, (UINTN)Len);
+    if (!Buf) {
+        File->Close(File);
+        Root->Close(Root);
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    UINTN Rd = (UINTN)Len;
+    Status = File->Read(File, &Rd, Buf);
+    File->Close(File);
+    Root->Close(Root);
+
+    if (EFI_ERROR(Status) || Rd != (UINTN)Len) {
+        _INT_FreePool(BS, Buf);
+        return EFI_ERROR(Status) ? Status : EFI_DEVICE_ERROR;
+    }
+
+    *Data = Buf;
+    *Size = Rd;
+    return EFI_SUCCESS;
+}
+
+// Replace the (empty) VBT mailbox of the firmware OpRegion with a VBT file
+// from the ESP. Mailbox 4 lives at OpRegion+0x400 and is 6 KB.
+#define OPREGION_VBT_OFF   0x400
+#define OPREGION_VBT_MAX   0x1800
+
+EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                          CHAR16* Name, _INT_Rep* R)
+{
+    EFI_STATUS Status;
+    UINT32 Id = 0;
+    VOID* Data = NULL;
+    UINTN Size = 0;
+
+    EFI_PCI_IO_PROTOCOL* Igpu = FindIgpu(BS, ImageHandle, &Id, &Status);
+    if (!Igpu) {
+        S("Inject: no Intel iGPU found"); NL();
+        return EFI_NOT_FOUND;
+    }
+
+    UINT32 asls = 0;
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, IGPU_PCI_ASLS, 1, &asls);
+    if (asls == 0 || asls == 0xFFFFFFFF) {
+        S("Inject: ASLS is 0, no OpRegion to write into"); NL();
+        return EFI_NOT_FOUND;
+    }
+
+    UINT8* op = (UINT8*)(UINTN)asls;
+    static const CHAR8 sig[] = "IntelGraphicsMem";
+    for (UINTN i = 0; sig[i]; i++) {
+        if (op[i] != (UINT8)sig[i]) {
+            S("Inject: OpRegion signature mismatch"); NL();
+            return EFI_NOT_FOUND;
+        }
+    }
+
+    UINTN opsize = (UINTN)_INT_Rd32(op + 16) * 1024;
+    if (opsize < OPREGION_VBT_OFF + 0x100) {
+        S("Inject: OpRegion too small ("); DC(opsize); S(" bytes)"); NL();
+        return EFI_BUFFER_TOO_SMALL;
+    }
+
+    Status = _INT_ReadEspFile(BS, ImageHandle, Name, &Data, &Size);
+    if (EFI_ERROR(Status)) {
+        S("Inject: cannot read VBT file from ESP, status=0x"); HX(Status, 16); NL();
+        return Status;
+    }
+
+    UINT8* v = (UINT8*)Data;
+    if (Size < 48 || !IsVbt(v)) {
+        S("Inject: file is not a VBT (no $VBT signature)"); NL();
+        _INT_FreePool(BS, Data);
+        return EFI_COMPROMISED_DATA;
+    }
+
+    UINTN vsz = _INT_Rd16(v + 24);
+    if (vsz == 0 || vsz > Size) vsz = Size;
+    UINTN room = opsize - OPREGION_VBT_OFF;
+    if (room > OPREGION_VBT_MAX) room = OPREGION_VBT_MAX;
+    if (vsz > room) {
+        S("Inject: VBT is "); DC(vsz); S(" bytes, mailbox only has "); DC(room); NL();
+        _INT_FreePool(BS, Data);
+        return EFI_BUFFER_TOO_SMALL;
+    }
+
+    // clear the whole mailbox, then copy the VBT in
+    for (UINTN i = 0; i < room; i++) op[OPREGION_VBT_OFF + i] = 0;
+    for (UINTN i = 0; i < vsz; i++)  op[OPREGION_VBT_OFF + i] = v[i];
+
+    // read back to make sure the write stuck (memory may be read-only/remapped)
+    BOOLEAN ok = TRUE;
+    for (UINTN i = 0; i < vsz; i++)
+        if (op[OPREGION_VBT_OFF + i] != v[i]) { ok = FALSE; break; }
+
+    S("Inject: wrote "); DC(vsz); S(" bytes at OpRegion+0x400, readback ");
+    S(ok ? "OK" : "MISMATCH (write did not stick)"); NL();
+
+    _INT_FreePool(BS, Data);
+    return ok ? EFI_SUCCESS : EFI_DEVICE_ERROR;
 }

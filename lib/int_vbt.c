@@ -170,7 +170,7 @@ static VOID ParseChildren(const UINT8* d, UINTN sz, _INT_Rep* R, _INT_VbtInfo* I
         UINT8 aux  = csz > 25 ? c[25] : 0;
 
         // eDP-like: INTERNAL_CONNECTOR + DISPLAYPORT bits as used by i915 (0x1806 pattern)
-        BOOLEAN edp = ((dtype & 0x1806) == 0x1806) && (dvo == 10 || dvo == 7 || dvo == 8 || dvo == 9);
+        BOOLEAN edp = (dtype == 0x78C6) || (((dtype & 0x1004) == 0x1004) && dvo == 10);
 
         S("  child["); DC(i); S("] handle="); HX(handle, 4);
         S(" type="); HX(dtype, 4);
@@ -214,7 +214,7 @@ static VOID ParseEdp(const UINT8* d, UINTN sz, UINT8 panel, _INT_Rep* R, _INT_Vb
     // vswing_preemph u64, fast_link_training u16, dpcd_600h u16, ...
     if (sz >= 160) {
         const UINT8* p = d + panel * 10;
-        S("  power seq (raw, units 100us; t11_t12 units 100ms):"); NL();
+        S("  power seq (raw, units 100us; all units 100us):"); NL();
         S("    t1_t3="); DC(_INT_Rd16(p));
         S(" t8="); DC(_INT_Rd16(p + 2));
         S(" t9="); DC(_INT_Rd16(p + 4));

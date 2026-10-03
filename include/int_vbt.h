@@ -60,4 +60,12 @@ EFI_STATUS _INT_InspectIgpuOpRegion(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandl
 EFI_STATUS _INT_WriteEspFile(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                              CHAR16* Name, const VOID* Data, UINTN Size);
 
+// Read a whole file (<= 1 MB) from the root of the boot volume (pool-allocated).
+EFI_STATUS _INT_ReadEspFile(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                            CHAR16* Name, VOID** Data, UINTN* Size);
+
+// Copy a VBT file from the ESP into OpRegion mailbox 4 (OpRegion+0x400).
+EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                          CHAR16* Name, _INT_Rep* R);
+
 #endif

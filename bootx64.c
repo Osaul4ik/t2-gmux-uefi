@@ -543,6 +543,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     BOOLEAN DoWritePrefsIgd = FALSE;
     BOOLEAN DoWritePrefsDgpu = FALSE;
     BOOLEAN DoDump = FALSE;
+    BOOLEAN DoInject = FALSE;
 
     if (AppleSetOsHandleCount == 0) {
         _INT_SimpleTextGraphicsPrint(
@@ -557,7 +558,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 7, FALSE, TRUE,
-        L"X=mux+off V=mux C=rail R/E=NVRAM D=X+dump W=dump"
+        L"X=mux+off V=mux C=rail R/E=NVRAM D=X+dump W=dump I=X+VBT inject"
     );
 
 
@@ -753,6 +754,18 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                   L"\\t2gmux_before_vbt.bin", L"before", 11);
     }
 
+    if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
+        // X actions + write \t2gmux_vbt.bin from the ESP into OpRegion mailbox 4
+        DoGmuxSwitch = TRUE;
+        DoDgpuPowerOff = TRUE;
+        DoDump = TRUE;
+        DoInject = TRUE;
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 7, TRUE, TRUE,
+            L"I: X (mux+rail OFF) + inject t2gmux_vbt.bin + dump"
+        );
+    }
+
     // load apple_set_os
     for(UINTN i = 0; i < AppleSetOsHandleCount; i++) {
         EFI_APPLE_SET_OS_IFACE* SetOsIface = NULL;
@@ -871,6 +884,23 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         for (UINT16 j = 0; j < 50; j++) {
             BS->Stall(10000);
         }
+    }
+
+    if (DoInject) {
+        const UINTN RCap = 4096;
+        CHAR8 *RBuf = (CHAR8 *)_INT_AllocatePool(BS, RCap);
+        EFI_STATUS IS = EFI_OUT_OF_RESOURCES;
+        if (RBuf != NULL) {
+            _INT_Rep IR;
+            _INT_RepInit(&IR, RBuf, RCap);
+            IS = _INT_InjectVbt(BS, ImageHandle, L"\\t2gmux_vbt.bin", &IR);
+            _INT_WriteEspFile(BS, ImageHandle, L"\\t2gmux_inject.txt", RBuf, IR.len);
+            _INT_FreePool(BS, RBuf);
+        }
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 19, TRUE, TRUE,
+            L"VBT inject: %s (%lX)", EFI_ERROR(IS) ? L"FAILED" : L"OK", IS
+        );
     }
 
     if (DoDump) {
