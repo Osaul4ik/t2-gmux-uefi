@@ -5,6 +5,8 @@
 #include "include/int_guid.h"
 #include "include/int_dpath.h"
 #include "include/pci_db.h"
+#include "include/int_vbt.h"
+#include "include/int_mem.h"
 
 
 #define APPLE_SET_OS_VENDOR  "Apple Inc."
@@ -258,6 +260,93 @@ SetGpuPowerPrefsDgpu(EFI_RUNTIME_SERVICES *RT)
     );
 }
 
+
+// ---- OpRegion / VBT diagnostic dump (keys D / W) ----
+// Writes <tag>.txt (readable report), <tag>.bin (raw OpRegion) and
+// <tag>_vbt.bin (raw VBT) to the ESP root and shows a short summary.
+static VOID
+DoVbtDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruct *gs,
+          CHAR16 *TxtName, CHAR16 *OpName, CHAR16 *VbtName, CHAR16 *Label, UINTN Row)
+{
+    const UINTN Cap = 49152;
+    CHAR8 *Buf = (CHAR8 *)_INT_AllocatePool(BS, Cap);
+    _INT_Rep R;
+    _INT_VbtInfo Info;
+    EFI_STATUS St;
+
+    if (Buf == NULL)
+        return;
+    _INT_RepInit(&R, Buf, Cap);
+
+    _INT_RepStr(&R, (const CHAR8 *)"=== t2-gmux-uefi OpRegion/VBT dump: ");
+    for (UINTN i = 0; Label[i]; i++) {
+        CHAR8 t[2] = { (CHAR8)Label[i], 0 };
+        _INT_RepStr(&R, t);
+    }
+    _INT_RepStr(&R, (const CHAR8 *)" ==="); _INT_RepNl(&R);
+
+    // gmux register readback (port: value) so the mux state is part of the report
+    {
+        volatile UINT8 *Base = (volatile UINT8 *)(UINTN)GMUX_PHYS_BASE;
+        static const UINT8 Ports[4] = { GMUX_PORT_SWITCH_DISPLAY, GMUX_PORT_SWITCH_DDC,
+                                        GMUX_PORT_SWITCH_EXTERNAL, GMUX_PORT_DISCRETE_POWER };
+        _INT_RepStr(&R, (const CHAR8 *)"gmux readback:");
+        if (!GmuxDetect(Base)) {
+            _INT_RepStr(&R, (const CHAR8 *)" no gmux");
+        } else {
+            for (UINTN i = 0; i < 4; i++) {
+                UINT8 v = 0;
+                _INT_RepStr(&R, (const CHAR8 *)" 0x"); _INT_RepHex(&R, Ports[i], 2);
+                _INT_RepStr(&R, (const CHAR8 *)"=");
+                if (GmuxRead8(Base, BS, Ports[i], &v)) {
+                    _INT_RepHex(&R, v, 2);
+                } else {
+                    _INT_RepStr(&R, (const CHAR8 *)"??");
+                }
+            }
+        }
+        _INT_RepNl(&R);
+    }
+
+    St = _INT_InspectIgpuOpRegion(BS, Image, &R, &Info);
+
+    EFI_STATUS S1 = _INT_WriteEspFile(BS, Image, TxtName, Buf, R.len);
+    EFI_STATUS S2 = EFI_NOT_FOUND, S3 = EFI_NOT_FOUND;
+    if (Info.OpRegion)
+        S2 = _INT_WriteEspFile(BS, Image, OpName, Info.OpRegion, Info.OpSize);
+    if (Info.Vbt)
+        S3 = _INT_WriteEspFile(BS, Image, VbtName, Info.Vbt, Info.VbtSize);
+
+    _INT_SimpleTextGraphicsPrint(gs, 0, Row, TRUE, FALSE,
+        L"[%s] iGPU=%s ASLS=%x OpRegion=%s VBT=%s (ver %d, bdb %d)",
+        Label, Info.IgpuFound ? L"yes" : L"NO", Info.Asls,
+        Info.OpRegionOk ? L"ok" : L"NO", Info.VbtFound ? L"ok" : L"NO",
+        (UINTN)Info.VbtVer, (UINTN)Info.BdbVer);
+    if (Info.EdpFound) {
+        _INT_SimpleTextGraphicsPrint(gs, 0, Row + 1, TRUE, FALSE,
+            L"  eDP child: type=%04x dvo_port=%d aux=%02x ddc_pin=%d",
+            (UINTN)Info.EdpType, (UINTN)Info.EdpDvoPort, (UINTN)Info.EdpAux, (UINTN)Info.EdpDdc);
+    } else {
+        _INT_SimpleTextGraphicsPrint(gs, 0, Row + 1, TRUE, FALSE,
+            L"  eDP child: NOT FOUND in VBT");
+    }
+    if (Info.HaveLink) {
+        _INT_SimpleTextGraphicsPrint(gs, 0, Row + 2, TRUE, FALSE,
+            L"  panel_type=%d link rate code=%d lanes code=%d",
+            (UINTN)Info.PanelType, (UINTN)Info.LinkRate, (UINTN)Info.LinkLanes);
+    } else {
+        _INT_SimpleTextGraphicsPrint(gs, 0, Row + 2, TRUE, FALSE,
+            L"  panel_type=%d, no eDP link params", (UINTN)Info.PanelType);
+    }
+    _INT_SimpleTextGraphicsPrint(gs, 0, Row + 3, TRUE, TRUE,
+        L"  files: txt=%s bin=%s vbt=%s (inspect=%lX)",
+        EFI_ERROR(S1) ? L"FAIL" : L"ok",
+        EFI_ERROR(S2) ? L"-" : L"ok",
+        EFI_ERROR(S3) ? L"-" : L"ok", St);
+
+    _INT_FreePool(BS, Buf);
+}
+
 VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HANDLE ImageHandle)
 {
     EFI_STATUS Status;
@@ -453,6 +542,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     BOOLEAN DoDgpuPowerOff = FALSE;
     BOOLEAN DoWritePrefsIgd = FALSE;
     BOOLEAN DoWritePrefsDgpu = FALSE;
+    BOOLEAN DoDump = FALSE;
 
     if (AppleSetOsHandleCount == 0) {
         _INT_SimpleTextGraphicsPrint(
@@ -467,7 +557,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 7, FALSE, TRUE,
-        L"X=mux+off V=mux C=railOff R/E=NVRAM"
+        L"X=mux+off V=mux C=rail R/E=NVRAM D=X+dump W=dump"
     );
 
 
@@ -639,6 +729,30 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         );
     }
 
+    if (Key.UnicodeChar == L'd' || Key.UnicodeChar == L'D') {
+        // same actions as X, plus OpRegion/VBT dump before/after
+        DoGmuxSwitch = TRUE;
+        DoDgpuPowerOff = TRUE;
+        DoDump = TRUE;
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 7, TRUE, TRUE,
+            L"D: X (mux+rail OFF) + OpRegion/VBT dump"
+        );
+    }
+    if (Key.UnicodeChar == L'w' || Key.UnicodeChar == L'W') {
+        // dump only, no gmux / rail / NVRAM changes
+        DoDump = TRUE;
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 7, TRUE, TRUE,
+            L"W: OpRegion/VBT dump only (no gmux changes)"
+        );
+    }
+
+    if (DoDump) {
+        DoVbtDump(BS, ImageHandle, &gs, L"\\t2gmux_before.txt", L"\\t2gmux_before_opregion.bin",
+                  L"\\t2gmux_before_vbt.bin", L"before", 11);
+    }
+
     // load apple_set_os
     for(UINTN i = 0; i < AppleSetOsHandleCount; i++) {
         EFI_APPLE_SET_OS_IFACE* SetOsIface = NULL;
@@ -756,6 +870,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         );
         for (UINT16 j = 0; j < 50; j++) {
             BS->Stall(10000);
+        }
+    }
+
+    if (DoDump) {
+        DoVbtDump(BS, ImageHandle, &gs, L"\\t2gmux_after.txt", L"\\t2gmux_after_opregion.bin",
+                  L"\\t2gmux_after_vbt.bin", L"after", 15);
+        for (UINT16 j = 0; j < 800; j++) {
+            BS->Stall(10000);   // ~8 s to read the summary
         }
     }
 
