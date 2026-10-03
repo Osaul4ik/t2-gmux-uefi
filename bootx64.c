@@ -537,6 +537,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     //   C = rail OFF only (mux not changed)
     //   R = NVRAM gpu-power-prefs = dGPU only
     //   E = NVRAM gpu-power-prefs = iGPU only
+    //   I = X + inject t2gmux_vbt.bin + dump;  U = V (Radeon stays powered) + inject + dump
     // Default (no key): no mux change, no rail change, no NVRAM
     BOOLEAN DoGmuxSwitch = FALSE;
     BOOLEAN DoDgpuPowerOff = FALSE;
@@ -558,7 +559,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 7, FALSE, TRUE,
-        L"X=mux+off V=mux C=rail R/E=NVRAM D=X+dump W=dump I=X+VBT inject"
+        L"X=mux+off V=mux C=rail R/E=NVRAM D=X+dump W=dump I=X+inject U=V+inject"
     );
 
 
@@ -763,6 +764,17 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
             L"I: X (mux+rail OFF) + inject t2gmux_vbt.bin + dump"
+        );
+    }
+    if (Key.UnicodeChar == L'u' || Key.UnicodeChar == L'U') {
+        // V actions (mux -> iGPU, Radeon rail stays ON) + same VBT inject + dump as I
+        DoGmuxSwitch = TRUE;
+        DoDgpuPowerOff = FALSE;
+        DoDump = TRUE;
+        DoInject = TRUE;
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 7, TRUE, TRUE,
+            L"U: V (mux, Radeon stays ON) + inject t2gmux_vbt.bin + dump"
         );
     }
 
