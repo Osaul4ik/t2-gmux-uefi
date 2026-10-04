@@ -296,29 +296,8 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 
 // Firmware boot GPU preference (forum "only via EFI" path).
 // GUID fa4ce28d-b62f-4c99-9cc3-6815686e30f9, name gpu-power-prefs,
-// first data byte 1=iGPU, 0=dGPU. Takes effect next cold boot as well.
-static EFI_STATUS
-SetGpuPowerPrefsIgd(EFI_RUNTIME_SERVICES *RT)
-{
-    EFI_GUID Guid = {
-        0xfa4ce28d, 0xb62f, 0x4c99,
-        { 0x9c, 0xc3, 0x68, 0x15, 0x68, 0x6e, 0x30, 0xf9 }
-    };
-    UINT8 Data[4] = { 0x01, 0x00, 0x00, 0x00 };
-    UINT32 Attr =
-        EFI_VARIABLE_NON_VOLATILE |
-        EFI_VARIABLE_BOOTSERVICE_ACCESS |
-        EFI_VARIABLE_RUNTIME_ACCESS;
-
-    return RT->SetVariable(
-        L"gpu-power-prefs",
-        &Guid,
-        Attr,
-        sizeof(Data),
-        Data
-    );
-}
-
+// first data byte 1=iGPU, 0=dGPU. Takes effect on the next cold boot.
+// Only the dGPU variant (key R) is used.
 static EFI_STATUS
 SetGpuPowerPrefsDgpu(EFI_RUNTIME_SERVICES *RT)
 {
@@ -342,7 +321,7 @@ SetGpuPowerPrefsDgpu(EFI_RUNTIME_SERVICES *RT)
 }
 
 
-// ---- OpRegion / VBT diagnostic dump (keys D / W) ----
+// ---- OpRegion / VBT diagnostic dump (keys D / I / U) ----
 // Writes <tag>.txt (readable report), <tag>.bin (raw OpRegion) and
 // <tag>_vbt.bin (raw VBT) to the ESP root and shows a short summary.
 static VOID
@@ -613,35 +592,32 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
 
     // Keys (after countdown):
-    //   Z = skip AppleSetOs
-    //   X = gmux panel->iGPU + dGPU rail OFF (no NVRAM)
-    //   V = gmux panel->iGPU only (Radeon stays powered, no NVRAM)
-    //   C = rail OFF only (mux not changed)
-    //   R = NVRAM gpu-power-prefs = dGPU only
-    //   E = NVRAM gpu-power-prefs = iGPU only
-    //   I = X + inject t2gmux_vbt.bin + dump;  U = V (Radeon stays powered) + inject + dump
-    // Default (no key): no mux change, no rail change, no NVRAM
+    //   R = NVRAM gpu-power-prefs = dGPU only, then restart
+    //   D = gmux panel->iGPU + dGPU rail OFF + OpRegion/VBT dump
+    //   I = D + inject t2gmux_vbt.bin + DDI A 4 lanes
+    //   U = like I, but the Radeon rail stays ON
+    // Default (no key, or any other key): plain boot - no AppleSetOs, no mux, no rail, no NVRAM
     BOOLEAN DoGmuxSwitch = FALSE;
     BOOLEAN DoDgpuPowerOff = FALSE;
-    BOOLEAN DoWritePrefsIgd = FALSE;
     BOOLEAN DoWritePrefsDgpu = FALSE;
+    BOOLEAN DoSetOs = FALSE;   // AppleSetOs only for D / I / U (iGPU must become visible)
     BOOLEAN DoDump = FALSE;
     BOOLEAN DoInject = FALSE;
 
     if (AppleSetOsHandleCount == 0) {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 2, TRUE, TRUE,
-            L"AppleSetOs will not be loaded."
+            L"AppleSetOs not available."
         );
     } else {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 2, TRUE, TRUE,
-            L"AppleSetOs ON (Z=skip). Default=no gmux/rail"
+            L"No key = plain boot (no AppleSetOs, no gmux). AppleSetOs only with D/I/U"
         );
     }
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 7, FALSE, TRUE,
-        L"X=mux+off V=mux C=rail R/E=NVRAM D=X+dump W=dump I=X+inject U=V+inject"
+        L"R=NVRAM dGPU+restart D=mux+off+dump I=D+inject U=mux+inject"
     );
 
 
@@ -761,108 +737,62 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         }
     }
 
-    // Z / X / V / C / R / E — see UI comments above
-    if (Key.UnicodeChar == L'z' || Key.UnicodeChar == L'Z') {
-        AppleSetOsHandleCount = 0;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 2, TRUE, TRUE,
-            L"AppleSetOs will not be loaded."
-        );
-    }
-    if (Key.UnicodeChar == L'x' || Key.UnicodeChar == L'X') {
-        DoGmuxSwitch = TRUE;
-        DoDgpuPowerOff = TRUE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"X: gmux iGPU + dGPU rail OFF (no NVRAM)"
-        );
-    }
-    if (Key.UnicodeChar == L'v' || Key.UnicodeChar == L'V') {
-        DoGmuxSwitch = TRUE;
-        DoDgpuPowerOff = FALSE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"V: panel->iGPU only (Radeon powered, no NVRAM)"
-        );
-    }
-    if (Key.UnicodeChar == L'c' || Key.UnicodeChar == L'C') {
-        // mux not changed; only rail OFF
-        DoGmuxSwitch = FALSE;
-        DoDgpuPowerOff = TRUE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"C: dGPU rail OFF only (mux unchanged)"
-        );
-    }
+    // R / D / I / U - see UI comments above
     if (Key.UnicodeChar == L'r' || Key.UnicodeChar == L'R') {
-        // NVRAM only — dGPU; mux/rail left at default (off)
+        // NVRAM only; mux/rail left alone. The system restarts after the write.
         DoWritePrefsDgpu = TRUE;
-        DoWritePrefsIgd = FALSE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
-            L"R: NVRAM gpu-power-prefs = dGPU only"
+            L"R: NVRAM gpu-power-prefs = dGPU only, then restart"
         );
     }
-    if (Key.UnicodeChar == L'e' || Key.UnicodeChar == L'E') {
-        // NVRAM only — iGPU; mux/rail left at default (off)
-        DoWritePrefsIgd = TRUE;
-        DoWritePrefsDgpu = FALSE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"E: NVRAM gpu-power-prefs = iGPU only"
-        );
-    }
-
     if (Key.UnicodeChar == L'd' || Key.UnicodeChar == L'D') {
-        // same actions as X, plus OpRegion/VBT dump before/after
+        // mux -> iGPU + rail OFF, plus OpRegion/VBT dump before/after
         DoGmuxSwitch = TRUE;
+        DoSetOs = TRUE;
         DoDgpuPowerOff = TRUE;
         DoDump = TRUE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
-            L"D: X (mux+rail OFF) + OpRegion/VBT dump"
+            L"D: mux->iGPU + rail OFF + OpRegion/VBT dump"
         );
     }
-    if (Key.UnicodeChar == L'w' || Key.UnicodeChar == L'W') {
-        // dump only, no gmux / rail / NVRAM changes
-        DoDump = TRUE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"W: OpRegion/VBT dump only (no gmux changes)"
-        );
-    }
-
     if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
-        // X actions + write \t2gmux_vbt.bin from the ESP into OpRegion mailbox 4
+        // D actions + write \t2gmux_vbt.bin from the ESP into OpRegion mailbox 4
         DoGmuxSwitch = TRUE;
+        DoSetOs = TRUE;
         DoDgpuPowerOff = TRUE;
         DoDump = TRUE;
         DoInject = TRUE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
-            L"I: X (mux+rail OFF) + inject t2gmux_vbt.bin + dump"
+            L"I: mux+rail OFF + inject t2gmux_vbt.bin + dump"
         );
     }
     if (Key.UnicodeChar == L'u' || Key.UnicodeChar == L'U') {
-        // V actions (mux -> iGPU, Radeon rail stays ON) + same VBT inject + dump as I
+        // mux -> iGPU, Radeon rail stays ON + same inject + dump as I
         DoGmuxSwitch = TRUE;
+        DoSetOs = TRUE;
         DoDgpuPowerOff = FALSE;
         DoDump = TRUE;
         DoInject = TRUE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
-            L"U: V (mux, Radeon stays ON) + inject t2gmux_vbt.bin + dump"
+            L"U: mux (Radeon stays ON) + inject t2gmux_vbt.bin + dump"
         );
     }
 
-    // Must come after every key that can set DoDump (D, W, I, U), otherwise I/U
+    // Must come after every key that can set DoDump (D, I, U), otherwise I/U
     // never write the "before" report.
     if (DoDump) {
         DoVbtDump(BS, ImageHandle, &gs, L"\\t2gmux_before.txt", L"\\t2gmux_before_opregion.bin",
                   L"\\t2gmux_before_vbt.bin", L"before", 11);
     }
 
-    // load apple_set_os
+    // load apple_set_os - only when D / I / U was pressed; no key = plain Windows boot
+    if (!DoSetOs) {
+        AppleSetOsHandleCount = 0;
+    }
     for(UINTN i = 0; i < AppleSetOsHandleCount; i++) {
         EFI_APPLE_SET_OS_IFACE* SetOsIface = NULL;
 
@@ -980,19 +910,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         }
     }
 
-    // NVRAM writes are independent of gmux (keys R / E)
-    if (DoWritePrefsIgd) {
-        EFI_STATUS st = SetGpuPowerPrefsIgd(SystemTable->RuntimeServices);
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 9, TRUE, TRUE,
-            L"NVRAM gpu-power-prefs=iGPU: %s (%lX)",
-            EFI_ERROR(st) ? L"FAIL" : L"OK",
-            st
-        );
-        for (UINT16 j = 0; j < 50; j++) {
-            BS->Stall(10000);
-        }
-    } else if (DoWritePrefsDgpu) {
+    // NVRAM write (key R) is independent of gmux; the system restarts after it
+    if (DoWritePrefsDgpu) {
         EFI_STATUS st = SetGpuPowerPrefsDgpu(SystemTable->RuntimeServices);
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 9, TRUE, TRUE,
@@ -1000,9 +919,20 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             EFI_ERROR(st) ? L"FAIL" : L"OK",
             st
         );
-        for (UINT16 j = 0; j < 50; j++) {
+        for (UINT16 j = 0; j < 100; j++) {
             BS->Stall(10000);
         }
+        if (!EFI_ERROR(st)) {
+            _INT_SimpleTextGraphicsPrint(
+                &gs, 0, 10, TRUE, TRUE,
+                L"Restarting..."
+            );
+            for (UINT16 j = 0; j < 100; j++) {
+                BS->Stall(10000);
+            }
+            SystemTable->RuntimeServices->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+        }
+        // write failed (or reset returned): do not restart, continue with a normal boot
     }
 
     if (DoInject) {
