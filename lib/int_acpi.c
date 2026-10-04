@@ -71,7 +71,7 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
     EFI_STATUS Status;
     VOID* FileData = NULL;
     UINTN FileSize = 0;
-    EFI_GUID acpi20 = { 0x8868e871, 0xe4f1, 0x11d3, { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x81, 0x88 } };
+    EFI_GUID acpi20 = { 0x8868e871, 0xe4f1, 0x11d3, { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } };  // ACPI_20_TABLE_GUID 8868e871-e4f1-11d3-bc22-0080c73c8881
 
     S("ACPI patch: "); NL();
 
