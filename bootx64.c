@@ -20,6 +20,8 @@
 #define GMUX_OFF_PORT_SELECT      0x0E
 #define GMUX_OFF_COMMAND          0x0F
 #define GMUX_PORT_SWITCH_DISPLAY  0x10
+#define GMUX_PORT_INTERRUPT_ENABLE 0x14
+#define GMUX_PORT_INTERRUPT_STATUS 0x16
 #define GMUX_PORT_SWITCH_DDC      0x28
 #define GMUX_PORT_SWITCH_EXTERNAL 0x40
 #define GMUX_ROUTE_IGD            2
@@ -27,6 +29,8 @@
 #define GMUX_DDC_IGD              1
 #define GMUX_DDC_DGPU             2
 #define GMUX_PORT_DISCRETE_POWER  0x50
+#define GMUX_INTERRUPT_ENABLE_ALL 0xFF
+#define GMUX_INTERRUPT_STATUS_POWER 0x04   // set by gmux when a rail change completed
 
 #pragma pack(1)
 typedef struct {
@@ -151,29 +155,61 @@ GmuxDetect(volatile UINT8 *Base)
     return Base[GMUX_OFF_COMMAND] != 0xFF;
 }
 
-// Route panel to iGPU (Linux force_igd analogue at UEFI time).
-// DDC + panel + external (external forced to dGPU on TB Macs, like Linux).
-static BOOLEAN
-GmuxSwitchToIGD(EFI_BOOT_SERVICES *BS)
+// ---- Interrupt mask / status (Linux gmux_enable/disable/clear_interrupts) ----
+// Linux runs with the mask at 0xFF, waits for GMUX_INTERRUPT_STATUS_POWER after a
+// rail change and clears status by writing the value back. We do the same around
+// the switch, then clear what we latched and restore the mask we found, so the
+// Windows gmux driver does not inherit a stale pending event. (Linux also calls
+// ACPI GMSP(0) on MMIO gmux to stop a status=0 flood; that needs the ACPI
+// interpreter and cannot be done from Boot Services.)
+typedef struct {
+    UINT8   Mask;
+    BOOLEAN MaskValid;
+} GMUX_IRQ_SAVE;
+
+static UINT8
+GmuxClearStatus(volatile UINT8 *Base, EFI_BOOT_SERVICES *BS)
 {
-    volatile UINT8 *Base = (volatile UINT8 *)(UINTN)GMUX_PHYS_BASE;
-    BOOLEAN ok;
-
-    if (!GmuxDetect(Base))
-        return FALSE;
-
-    // DDC -> iGPU (may be no-op on T2/retina, still written like Linux)
-    GmuxWrite8(Base, BS, GMUX_PORT_SWITCH_DDC, GMUX_DDC_IGD);
-
-    // Panel -> iGPU
-    ok = GmuxWrite8(Base, BS, GMUX_PORT_SWITCH_DISPLAY, GMUX_ROUTE_IGD);
-
-    // External AUX stays on dGPU (Thunderbolt Mac policy)
-    GmuxWrite8(Base, BS, GMUX_PORT_SWITCH_EXTERNAL, GMUX_ROUTE_DGPU);
-
-    return ok;
+    UINT8 st = 0;
+    if (!GmuxRead8(Base, BS, GMUX_PORT_INTERRUPT_STATUS, &st))
+        return 0;
+    GmuxWrite8(Base, BS, GMUX_PORT_INTERRUPT_STATUS, st); // write back = clear
+    return st;
 }
 
+static void
+GmuxIrqBegin(EFI_BOOT_SERVICES *BS, GMUX_IRQ_SAVE *Save)
+{
+    volatile UINT8 *Base = (volatile UINT8 *)(UINTN)GMUX_PHYS_BASE;
+
+    Save->Mask = 0;
+    Save->MaskValid = FALSE;
+    if (!GmuxDetect(Base))
+        return;
+    Save->MaskValid = GmuxRead8(Base, BS, GMUX_PORT_INTERRUPT_ENABLE, &Save->Mask);
+    GmuxWrite8(Base, BS, GMUX_PORT_INTERRUPT_ENABLE, GMUX_INTERRUPT_ENABLE_ALL);
+    GmuxClearStatus(Base, BS); // drop stale bits so only our own events are seen
+}
+
+// Returns the status bits that were still latched before clearing.
+static UINT8
+GmuxIrqEnd(EFI_BOOT_SERVICES *BS, const GMUX_IRQ_SAVE *Save)
+{
+    volatile UINT8 *Base = (volatile UINT8 *)(UINTN)GMUX_PHYS_BASE;
+    UINT8 st;
+
+    if (!GmuxDetect(Base))
+        return 0;
+    st = GmuxClearStatus(Base, BS);
+    if (Save->MaskValid)
+        GmuxWrite8(Base, BS, GMUX_PORT_INTERRUPT_ENABLE, Save->Mask);
+    return st;
+}
+
+// Panel routing readback. Linux gmux_read_switch_state(): bit 0 of port 0x10,
+// 0 = iGPU, 1 = dGPU. Only this port decides whether the panel is on the iGPU;
+// DDC/EXTERNAL are written like Linux but not used as a gate (DDC may be a no-op
+// on T2, EXTERNAL is forced to dGPU on Thunderbolt Macs).
 static BOOLEAN
 GmuxReadPanelIsIGD(EFI_BOOT_SERVICES *BS)
 {
@@ -184,26 +220,71 @@ GmuxReadPanelIsIGD(EFI_BOOT_SERVICES *BS)
         return FALSE;
     if (!GmuxRead8(Base, BS, GMUX_PORT_SWITCH_DISPLAY, &val))
         return FALSE;
-    // Linux/Windows: bit 0 of port 0x10: 0 = iGPU, 1 = dGPU
     return (val & 1) == 0;
 }
 
-// dGPU power rail (Linux gmux_set_discrete_state / Windows GmuxSetDiscretePower).
-// Sequence: write 1, then 3=ON or 0=OFF, then settle. Do NOT power the card
-// back on from Windows after OFF from here - that path hung this machine.
+// Route panel to iGPU. Same three writes and order as Linux
+// gmux_write_switch_state() for switch_state_* = IGD, with EXTERNAL kept on the
+// dGPU (Linux: external_switchable == false when Thunderbolt is present).
+// Linux issues the writes once and never checks; here the result is verified by
+// readback and retried, because the rail must not be cut unless the panel is
+// really on the iGPU.
 static BOOLEAN
-GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn)
+GmuxSwitchToIGD(EFI_BOOT_SERVICES *BS)
+{
+    volatile UINT8 *Base = (volatile UINT8 *)(UINTN)GMUX_PHYS_BASE;
+
+    if (!GmuxDetect(Base))
+        return FALSE;
+
+    for (UINTN attempt = 0; attempt < 3; attempt++) {
+        BOOLEAN ok;
+
+        GmuxWrite8(Base, BS, GMUX_PORT_SWITCH_DDC, GMUX_DDC_IGD);
+        ok = GmuxWrite8(Base, BS, GMUX_PORT_SWITCH_DISPLAY, GMUX_ROUTE_IGD);
+        GmuxWrite8(Base, BS, GMUX_PORT_SWITCH_EXTERNAL, GMUX_ROUTE_DGPU);
+
+        BS->Stall(10000); // let the mux settle before reading back
+        if (ok && GmuxReadPanelIsIGD(BS))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+// dGPU power rail (Linux gmux_set_discrete_state / Windows GmuxSetDiscretePower).
+// Sequence: write 1, then 3=ON or 0=OFF. Linux then waits for the POWER bit in
+// the interrupt status (GPE, 200 ms timeout); we poll the same bit and fall back
+// to a fixed settle if it never shows. Do NOT power the card back on from
+// Windows after OFF from here - that path hung this machine.
+static BOOLEAN
+GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent)
 {
     volatile UINT8 *Base = (volatile UINT8 *)(UINTN)GMUX_PHYS_BASE;
     BOOLEAN ok;
+    BOOLEAN seen = FALSE;
 
+    if (PowerEvent)
+        *PowerEvent = FALSE;
     if (!GmuxDetect(Base))
         return FALSE;
 
     ok = GmuxWrite8(Base, BS, GMUX_PORT_DISCRETE_POWER, 1);
     ok = (BOOLEAN)(GmuxWrite8(Base, BS, GMUX_PORT_DISCRETE_POWER, PowerOn ? 3 : 0) && ok);
-    // ~250 ms settle (Linux uses GPE when available; fixed delay otherwise)
-    BS->Stall(250000);
+
+    for (UINT32 waited = 0; waited < 200 && !seen; waited++) {
+        UINT8 st = 0;
+        if (GmuxRead8(Base, BS, GMUX_PORT_INTERRUPT_STATUS, &st) &&
+            (st & GMUX_INTERRUPT_STATUS_POWER)) {
+            GmuxWrite8(Base, BS, GMUX_PORT_INTERRUPT_STATUS, st);
+            seen = TRUE;
+            break;
+        }
+        BS->Stall(1000);
+    }
+
+    BS->Stall(seen ? 20000 : 250000);
+    if (PowerEvent)
+        *PowerEvent = seen;
     return ok;
 }
 
@@ -288,13 +369,14 @@ DoVbtDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruct
     // gmux register readback (port: value) so the mux state is part of the report
     {
         volatile UINT8 *Base = (volatile UINT8 *)(UINTN)GMUX_PHYS_BASE;
-        static const UINT8 Ports[4] = { GMUX_PORT_SWITCH_DISPLAY, GMUX_PORT_SWITCH_DDC,
-                                        GMUX_PORT_SWITCH_EXTERNAL, GMUX_PORT_DISCRETE_POWER };
+        static const UINT8 Ports[6] = { GMUX_PORT_SWITCH_DISPLAY, GMUX_PORT_SWITCH_DDC,
+                                        GMUX_PORT_SWITCH_EXTERNAL, GMUX_PORT_DISCRETE_POWER,
+                                        GMUX_PORT_INTERRUPT_ENABLE, GMUX_PORT_INTERRUPT_STATUS };
         _INT_RepStr(&R, (const CHAR8 *)"gmux readback:");
         if (!GmuxDetect(Base)) {
             _INT_RepStr(&R, (const CHAR8 *)" no gmux");
         } else {
-            for (UINTN i = 0; i < 4; i++) {
+            for (UINTN i = 0; i < 6; i++) {
                 UINT8 v = 0;
                 _INT_RepStr(&R, (const CHAR8 *)" 0x"); _INT_RepHex(&R, Ports[i], 2);
                 _INT_RepStr(&R, (const CHAR8 *)"=");
@@ -750,11 +832,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         );
     }
 
-    if (DoDump) {
-        DoVbtDump(BS, ImageHandle, &gs, L"\\t2gmux_before.txt", L"\\t2gmux_before_opregion.bin",
-                  L"\\t2gmux_before_vbt.bin", L"before", 11);
-    }
-
     if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
         // X actions + write \t2gmux_vbt.bin from the ESP into OpRegion mailbox 4
         DoGmuxSwitch = TRUE;
@@ -776,6 +853,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             &gs, 0, 7, TRUE, TRUE,
             L"U: V (mux, Radeon stays ON) + inject t2gmux_vbt.bin + dump"
         );
+    }
+
+    // Must come after every key that can set DoDump (D, W, I, U), otherwise I/U
+    // never write the "before" report.
+    if (DoDump) {
+        DoVbtDump(BS, ImageHandle, &gs, L"\\t2gmux_before.txt", L"\\t2gmux_before_opregion.bin",
+                  L"\\t2gmux_before_vbt.bin", L"before", 11);
     }
 
     // load apple_set_os
@@ -829,35 +913,49 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     // ---- Optional gmux panel switch and/or dGPU rail OFF ----
     // Never power the dGPU rail back on from Windows after OFF (known hang on this HW).
+    BOOLEAN MuxOk = TRUE;
+    GMUX_IRQ_SAVE IrqSave;
+    BOOLEAN IrqActive = (BOOLEAN)(DoGmuxSwitch || DoDgpuPowerOff);
+
+    if (IrqActive)
+        GmuxIrqBegin(BS, &IrqSave);
+
     if (DoGmuxSwitch) {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
             L"Gmux: panel -> iGPU..."
         );
-        if (GmuxSwitchToIGD(BS)) {
-            BOOLEAN isIgd = GmuxReadPanelIsIGD(BS);
+        MuxOk = GmuxSwitchToIGD(BS);
+        if (MuxOk) {
             _INT_SimpleTextGraphicsPrint(
                 &gs, 0, 7, TRUE, TRUE,
-                L"Gmux: route OK, readback=%s",
-                isIgd ? L"iGPU" : L"dGPU/unknown"
+                L"Gmux: route OK, readback=iGPU"
             );
         } else {
             _INT_SimpleTextGraphicsPrint(
                 &gs, 0, 7, TRUE, TRUE,
-                L"Gmux: route FAILED (no gmux?)"
+                L"Gmux: route FAILED (no gmux or readback != iGPU)"
             );
         }
     }
 
-    if (DoDgpuPowerOff) {
+    if (DoDgpuPowerOff && DoGmuxSwitch && !MuxOk) {
+        // Cutting the rail while the panel is still routed to the Radeon blacks the screen.
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 8, TRUE, TRUE,
+            L"Gmux: dGPU rail OFF SKIPPED (panel not confirmed on iGPU)"
+        );
+    } else if (DoDgpuPowerOff) {
+        BOOLEAN PowerEvent = FALSE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 8, TRUE, TRUE,
             L"Gmux: powering OFF dGPU rail (0x50)..."
         );
-        if (GmuxSetDiscretePower(BS, FALSE)) {
+        if (GmuxSetDiscretePower(BS, FALSE, &PowerEvent)) {
             _INT_SimpleTextGraphicsPrint(
                 &gs, 0, 8, TRUE, TRUE,
-                L"Gmux: dGPU rail OFF OK"
+                L"Gmux: dGPU rail OFF OK (power event %s)",
+                PowerEvent ? L"seen" : L"not seen, fixed delay"
             );
         } else {
             _INT_SimpleTextGraphicsPrint(
@@ -865,6 +963,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 L"Gmux: dGPU rail OFF FAILED"
             );
         }
+    }
+
+    if (IrqActive) {
+        UINT8 Left = GmuxIrqEnd(BS, &IrqSave);
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 9, TRUE, TRUE,
+            L"Gmux: irq status cleared (was %x), mask restored=%s",
+            (UINTN)Left, IrqSave.MaskValid ? L"yes" : L"no"
+        );
     }
 
     if (DoGmuxSwitch || DoDgpuPowerOff) {
@@ -902,16 +1009,24 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         const UINTN RCap = 4096;
         CHAR8 *RBuf = (CHAR8 *)_INT_AllocatePool(BS, RCap);
         EFI_STATUS IS = EFI_OUT_OF_RESOURCES;
+        EFI_STATUS LS = EFI_OUT_OF_RESOURCES;
         if (RBuf != NULL) {
             _INT_Rep IR;
             _INT_RepInit(&IR, RBuf, RCap);
             IS = _INT_InjectVbt(BS, ImageHandle, L"\\t2gmux_vbt.bin", &IR);
+            // Same iGPU-side setup the firmware does when it boots from the iGPU
+            // (see _INT_IgpuForceDdiA4Lanes); the mux alone does not provide it.
+            LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
             _INT_WriteEspFile(BS, ImageHandle, L"\\t2gmux_inject.txt", RBuf, IR.len);
             _INT_FreePool(BS, RBuf);
         }
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 19, TRUE, TRUE,
             L"VBT inject: %s (%lX)", EFI_ERROR(IS) ? L"FAILED" : L"OK", IS
+        );
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 20, TRUE, TRUE,
+            L"DDI A 4 lanes: %s (%lX)", EFI_ERROR(LS) ? L"FAILED" : L"OK", LS
         );
     }
 

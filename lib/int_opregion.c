@@ -8,6 +8,9 @@
 #define DC(v) _INT_RepDec(R, (v))
 
 #define IGPU_PCI_ASLS      0xFC
+#define IGPU_PCI_BAR0      0x10
+#define IGPU_DDI_BUF_CTL_A 0x64000   // GTTMMADR (BAR0) offset
+#define DDI_A_4_LANES      (1u << 4)
 #define OPREGION_ASLE_OFF  0x100
 #define ASLE_RVDA_OFF      130   // offset of rvda (u64) inside the ASLE struct
 #define ASLE_RVDS_OFF      138   // offset of rvds (u32)
@@ -313,6 +316,18 @@ EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
         return EFI_BUFFER_TOO_SMALL;
     }
 
+    // i915 prefers a valid VBT behind ASLE.rvda/rvds over mailbox 4, so a non-empty
+    // rvda would make this injection invisible to it. Report only, do not touch.
+    {
+        UINT64 rvda = _INT_Rd64(op + OPREGION_ASLE_OFF + ASLE_RVDA_OFF);
+        UINT32 rvds = _INT_Rd32(op + OPREGION_ASLE_OFF + ASLE_RVDS_OFF);
+        S("Inject: ASLE rvda=0x"); HX(rvda, 16); S(" rvds="); DC(rvds); NL();
+        if (rvda != 0 && rvds != 0) {
+            S("Inject: WARNING rvda/rvds are set - a driver that prefers them "
+              "will ignore the mailbox 4 VBT written here"); NL();
+        }
+    }
+
     Status = _INT_ReadEspFile(BS, ImageHandle, Name, &Data, &Size);
     if (EFI_ERROR(Status)) {
         S("Inject: cannot read VBT file from ESP, status=0x"); HX(Status, 16); NL();
@@ -350,4 +365,75 @@ EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 
     _INT_FreePool(BS, Data);
     return ok ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+}
+
+// DDI A max lane count, as i915 sees it on display gen < 11 (T2 Macs with gmux are
+// all CFL/WHL-class, gen 9.5): intel_ddi_max_lanes() reads DDI_BUF_CTL(A) bit 4
+// (DDI_A_4_LANES) at driver init; clear = only 2 lanes, so a 4-lane eDP link can
+// never be computed no matter what the VBT says. Apple's firmware sets the bit
+// only when it lights the panel from the iGPU at boot. When the dGPU is the boot
+// GPU (our case) it stays clear - the t2linux patch "i915: 4 lane quirk for
+// mbp15,1" (QUIRK_DDI_A_FORCE_4_LANES) exists for exactly this. The driver loads
+// after us and cannot be patched, so set the bit here, like the firmware would.
+EFI_STATUS _INT_IgpuForceDdiA4Lanes(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                    _INT_Rep* R)
+{
+    EFI_STATUS Status;
+    UINT32 Id = 0;
+    UINT32 cmd = 0, bar0 = 0, bar1 = 0, v = 0;
+
+    EFI_PCI_IO_PROTOCOL* Igpu = FindIgpu(BS, ImageHandle, &Id, &Status);
+    if (!Igpu) {
+        S("DDI A: no Intel iGPU found"); NL();
+        return EFI_NOT_FOUND;
+    }
+
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, 4, 1, &cmd);
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, IGPU_PCI_BAR0, 1, &bar0);
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, IGPU_PCI_BAR0 + 4, 1, &bar1);
+
+    // BAR0 must be an assigned memory BAR before anything decodes it.
+    UINT64 base = (UINT64)(bar0 & ~0xFu);
+    if ((bar0 & 0x6) == 0x4)
+        base |= (UINT64)bar1 << 32;
+    if ((bar0 & 1) || base == 0) {
+        S("DDI A: iGPU BAR0 not assigned (BAR0=0x"); HX(bar0, 8); S("), skipped"); NL();
+        return EFI_NOT_READY;
+    }
+
+    if (!(cmd & 0x2)) {
+        Status = Igpu->Attributes(Igpu, EfiPciIoAttributeOperationEnable,
+                                  EFI_PCI_IO_ATTRIBUTE_MEMORY, NULL);
+        S("DDI A: iGPU memory decode was off, enable status=0x"); HX(Status, 16); NL();
+        if (EFI_ERROR(Status))
+            return Status;
+    }
+
+    Status = Igpu->Mem.Read(Igpu, EfiPciIoWidthUint32, 0, IGPU_DDI_BUF_CTL_A, 1, &v);
+    if (EFI_ERROR(Status)) {
+        S("DDI A: DDI_BUF_CTL_A read failed, status=0x"); HX(Status, 16); NL();
+        return Status;
+    }
+    S("DDI A: DDI_BUF_CTL_A = 0x"); HX(v, 8); NL();
+    if (v == 0xFFFFFFFF) {
+        S("DDI A: reads all ones (display power well down?), not writing"); NL();
+        return EFI_NOT_READY;
+    }
+    if (v & DDI_A_4_LANES) {
+        S("DDI A: DDI_A_4_LANES already set"); NL();
+        return EFI_SUCCESS;
+    }
+
+    v |= DDI_A_4_LANES;
+    Status = Igpu->Mem.Write(Igpu, EfiPciIoWidthUint32, 0, IGPU_DDI_BUF_CTL_A, 1, &v);
+    if (EFI_ERROR(Status)) {
+        S("DDI A: DDI_BUF_CTL_A write failed, status=0x"); HX(Status, 16); NL();
+        return Status;
+    }
+
+    UINT32 rb = 0;
+    Igpu->Mem.Read(Igpu, EfiPciIoWidthUint32, 0, IGPU_DDI_BUF_CTL_A, 1, &rb);
+    S("DDI A: set DDI_A_4_LANES, readback 0x"); HX(rb, 8);
+    S((rb & DDI_A_4_LANES) ? " OK" : " MISMATCH (bit did not stick)"); NL();
+    return (rb & DDI_A_4_LANES) ? EFI_SUCCESS : EFI_DEVICE_ERROR;
 }
