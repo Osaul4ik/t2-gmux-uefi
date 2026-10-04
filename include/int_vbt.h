@@ -72,4 +72,10 @@ EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 EFI_STATUS _INT_IgpuForceDdiA4Lanes(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                                     _INT_Rep* R);
 
+// Snapshot of iGPU display registers (power wells, DDI A, eDP transcoder, panel power,
+// backlight PWM) via BAR0, as a text report. Used to compare the state the Apple
+// firmware leaves when it boots from the iGPU with the cold state of a Radeon boot.
+EFI_STATUS _INT_DumpIgpuRegs(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                             _INT_Rep* R);
+
 #endif

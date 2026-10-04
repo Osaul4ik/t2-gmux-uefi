@@ -437,3 +437,124 @@ EFI_STATUS _INT_IgpuForceDdiA4Lanes(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandl
     S((rb & DDI_A_4_LANES) ? " OK" : " MISMATCH (bit did not stick)"); NL();
     return (rb & DDI_A_4_LANES) ? EFI_SUCCESS : EFI_DEVICE_ERROR;
 }
+
+
+// ---------------------------------------------------------------------------
+// iGPU display register snapshot
+// ---------------------------------------------------------------------------
+// Offsets are the Skylake/Coffee Lake (gen 9/9.5) display registers with the
+// CNP PCH layout, as named in Linux i915. Reads of a powered-down block usually
+// return all ones; that is part of the information, so nothing is filtered.
+
+typedef struct {
+    const char* Name;
+    UINT32      Off;
+} IGPU_REG;
+
+static const IGPU_REG IgpuRegs[] = {
+    // power wells / clocks
+    { "PWR_WELL_CTL1",        0x45400 },
+    { "PWR_WELL_CTL2",        0x45404 },
+    { "PWR_WELL_CTL3",        0x45408 },
+    { "PWR_WELL_CTL4",        0x4540C },
+    { "DBUF_CTL",             0x45008 },
+    { "CDCLK_CTL",            0x46000 },
+    { "LCPLL1_CTL",           0x46010 },
+    { "DPLL_CTRL1",           0x6C058 },
+    { "DPLL_CTRL2",           0x6C05C },
+    { "DPLL_STATUS",          0x6C060 },
+    // DDI A
+    { "DDI_BUF_CTL_A",        0x64000 },
+    { "DP_AUX_CH_CTL_A",      0x64010 },
+    { "DP_TP_CTL_A",          0x64040 },
+    { "DP_TP_STATUS_A",       0x64044 },
+    // eDP transcoder
+    { "TRANS_DDI_FUNC_CTL_EDP", 0x6F400 },
+    { "TRANS_MSA_MISC_EDP",   0x6F410 },
+    { "TRANS_CONF_EDP",       0x7F008 },
+    { "HTOTAL_EDP",           0x6F000 },
+    { "HBLANK_EDP",           0x6F004 },
+    { "HSYNC_EDP",            0x6F008 },
+    { "VTOTAL_EDP",           0x6F00C },
+    { "VBLANK_EDP",           0x6F010 },
+    { "VSYNC_EDP",            0x6F014 },
+    { "DATA_M1_EDP",          0x6F030 },
+    { "DATA_N1_EDP",          0x6F034 },
+    { "LINK_M1_EDP",          0x6F040 },
+    { "LINK_N1_EDP",          0x6F044 },
+    // pipe A / plane 1
+    { "PIPE_CONF_A",          0x70008 },
+    { "PIPE_SRC_A",           0x6001C },
+    { "PLANE_CTL_1_A",        0x70180 },
+    { "PLANE_SURF_1_A",       0x7019C },
+    // panel power sequencer (PCH PPS)
+    { "PP_STATUS",            0xC7200 },
+    { "PP_CONTROL",           0xC7204 },
+    { "PP_ON_DELAYS",         0xC7208 },
+    { "PP_OFF_DELAYS",        0xC720C },
+    { "PP_DIVISOR",           0xC7210 },
+    // backlight PWM (CNP: BXT-style controller 0) and PCH straps
+    { "BLC_PWM_CTL1",         0xC8250 },
+    { "BLC_PWM_FREQ1",        0xC8254 },
+    { "BLC_PWM_DUTY1",        0xC8258 },
+    { "SOUTH_CHICKEN1",       0xC2000 },
+    { "SFUSE_STRAP",          0xC2014 },
+};
+
+EFI_STATUS _INT_DumpIgpuRegs(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                             _INT_Rep* R)
+{
+    EFI_STATUS Status;
+    UINT32 Id = 0;
+    UINT32 cmd = 0, bar0 = 0, bar1 = 0, asls = 0;
+
+    EFI_PCI_IO_PROTOCOL* Igpu = FindIgpu(BS, ImageHandle, &Id, &Status);
+    if (!Igpu) {
+        S("Regs: no Intel iGPU visible (hidden until AppleSetOs on a Radeon boot)"); NL();
+        return EFI_NOT_FOUND;
+    }
+
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, 4, 1, &cmd);
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, IGPU_PCI_BAR0, 1, &bar0);
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, IGPU_PCI_BAR0 + 4, 1, &bar1);
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, IGPU_PCI_ASLS, 1, &asls);
+
+    S("iGPU "); HX(Id & 0xFFFF, 4); S(":"); HX(Id >> 16, 4);
+    S("  command=0x"); HX(cmd & 0xFFFF, 4);
+    S("  BAR0=0x"); HX(bar0, 8); S(" BAR1=0x"); HX(bar1, 8);
+    S("  ASLS=0x"); HX(asls, 8); NL();
+
+    UINT64 base = (UINT64)(bar0 & ~0xFu);
+    if ((bar0 & 0x6) == 0x4)
+        base |= (UINT64)bar1 << 32;
+    if ((bar0 & 1) || base == 0) {
+        S("Regs: BAR0 not assigned, nothing read"); NL();
+        return EFI_NOT_READY;
+    }
+
+    if (!(cmd & 0x2)) {
+        Status = Igpu->Attributes(Igpu, EfiPciIoAttributeOperationEnable,
+                                  EFI_PCI_IO_ATTRIBUTE_MEMORY, NULL);
+        S("Regs: memory decode was off, enabled it (status=0x"); HX(Status, 16); S(")"); NL();
+        if (EFI_ERROR(Status))
+            return Status;
+    }
+
+    UINTN n = sizeof(IgpuRegs) / sizeof(IgpuRegs[0]);
+    UINTN ones = 0;
+    for (UINTN i = 0; i < n; i++) {
+        UINT32 v = 0;
+        Status = Igpu->Mem.Read(Igpu, EfiPciIoWidthUint32, 0, IgpuRegs[i].Off, 1, &v);
+        S(IgpuRegs[i].Name);
+        S(" @0x"); HX(IgpuRegs[i].Off, 6); S(" = ");
+        if (EFI_ERROR(Status)) {
+            S("read failed 0x"); HX(Status, 16);
+        } else {
+            S("0x"); HX(v, 8);
+            if (v == 0xFFFFFFFF) { S("  (all ones)"); ones++; }
+        }
+        NL();
+    }
+    S("Regs: "); DC(n); S(" registers, "); DC(ones); S(" read as all ones"); NL();
+    return EFI_SUCCESS;
+}

@@ -7,17 +7,25 @@ UEFI loader (Boot Services, before Windows).
 | Key | mux panel→iGPU | dGPU rail OFF | Other |
 |-----|----------------|---------------|-------|
 | *(none)*, **Space** or any other key | no | no | plain Windows boot (immediately on a key, otherwise after 6 s): **no AppleSetOs**, no gmux, no NVRAM |
-| **R** | no | no | writes NVRAM `gpu-power-prefs` = **dGPU only**, then **restarts** |
-| **D** | yes | yes | OpRegion/VBT dump before/after |
-| **I** | yes | yes | D + VBT injection + `DDI_A_4_LANES` |
-| **U** | yes | **no** (Radeon stays on) | like I |
+| **R** | no | no | writes NVRAM `gpu-power-prefs` = **iGPU first**, then **restarts** |
+| **D** | no | no | **deletes** NVRAM `gpu-power-prefs` (Radeon is the boot GPU again), then **restarts** |
+| **I** | yes | yes | full switch to the iGPU: mux + Radeon rail OFF + VBT injection + `DDI_A_4_LANES` + OpRegion/VBT dump before/after |
+| **U** | yes | **no** (Radeon stays on) | same as I, Radeon stays powered |
+| **B** | no | no | **dump only**: no AppleSetOs, nothing switched or injected; writes the clean OpRegion/VBT/gmux and iGPU register dumps, then boots normally |
 
-AppleSetOs is loaded only for D, I and U (the iGPU has to become visible for
-them). R only writes NVRAM and restarts, without AppleSetOs. R restarts only if
-the NVRAM write succeeded; on failure the message stays on screen and the normal
-boot continues.
+AppleSetOs is loaded only for I and U (B and the plain boot skip it) (the iGPU has to become visible for
+them). R and D only change NVRAM and restart, without AppleSetOs. They restart
+only if the NVRAM operation succeeded; on failure the message stays on screen
+and the normal boot continues. D on a machine where the variable does not exist
+counts as success (already the default).
 
-## What the mux/rail keys do (D, I, U)
+Recommended flow for a working Intel panel: **R** (restart, the firmware now
+lights the panel from the iGPU), then **I** or **U** on the next boot. Pressing
+I/U straight on a Radeon boot switches the mux under a live panel and the Intel
+driver has to bring the eDP link up from cold; that is what leaves the panel
+black with no backlight.
+
+## What the mux/rail keys do (I, U)
 
 Sequence follows Linux `apple-gmux` (T2 MMIO gmux):
 
@@ -38,8 +46,8 @@ the panel link itself, hence the VBT injection below).
 
 ## WARNING
 
-- After dGPU rail OFF (**D** or **I**), do **not** power Radeon back on from Windows.
-- Recovery NVRAM: press **R** (writes dGPU-only and restarts).
+- After dGPU rail OFF (**I**), do **not** power Radeon back on from Windows.
+- Recovery NVRAM: press **D** (deletes `gpu-power-prefs`, Radeon boots first again, and restarts).
 
 ## Install / build
 
@@ -52,20 +60,54 @@ docker build -t apple_set_os_loader .
 docker run --rm -v "$(pwd):/build" apple_set_os_loader make clean all
 ```
 
-## OpRegion / VBT dump (keys D, I, U)
+## OpRegion / VBT dump (keys I, U)
 
 Diagnoses "no eDP link training when the Intel driver loads": the Intel
 driver takes DDI port, AUX channel, link rate, lane count and panel power
 timings from the VBT in the OpRegion (PCI config 0xFC `ASLS` of the iGPU).
 
 Files written to the ESP root (before = before `apple_set_os`, after = after
-apple_set_os + gmux/rail actions; keys D, I and U all write both):
+apple_set_os + gmux/rail actions; keys I and U write both):
 
 - `t2gmux_before.txt` / `t2gmux_after.txt` – readable report (gmux readback, OpRegion, VBT child devices, eDP block)
 - `t2gmux_*_opregion.bin`, `t2gmux_*_vbt.bin` – raw data
 
 Share the `.txt` and `_vbt.bin` files to analyse them. Parser is checked only
 against a synthetic VBT, not yet against real hardware.
+
+## Clean dump (key B)
+
+B changes nothing: no AppleSetOs, no mux, no rail, no injection, no NVRAM. It
+writes the same reports as I/U but for the untouched state, with the tag `clean`:
+
+- `t2gmux_clean.txt`, `t2gmux_clean_opregion.bin`, `t2gmux_clean_vbt.bin` (gmux readback, OpRegion, VBT)
+- `t2gmux_regs_clean.txt` (iGPU display registers)
+
+Use it after **R** + restart: the firmware has lit the panel from the iGPU, so
+this is the reference state to compare against the Radeon-boot `after` files.
+On a Radeon boot the iGPU is hidden without AppleSetOs, so the iGPU parts only
+report "no Intel iGPU visible" (the gmux readback is still written).
+
+## iGPU register snapshot (keys I, U)
+
+Besides the OpRegion/VBT files, I and U write two register snapshots of the
+Intel display engine (BAR0): `t2gmux_regs_before.txt` (before AppleSetOs and the
+mux) and `t2gmux_regs_after.txt` (after mux, rail and injection). They hold power
+wells, CDCLK/DPLL, DDI A (`DDI_BUF_CTL`, `DP_TP_*`, AUX), the eDP transcoder
+(function control, timings, M/N), pipe A/plane 1, the panel power sequencer
+(`PP_*`) and the backlight PWM (`BLC_PWM_*`).
+
+Why: with `gpu-power-prefs` = iGPU (key R) the Apple firmware lights the panel
+from Intel and the picture works; on a Radeon boot the same I/U leaves the panel
+black. Take both runs and diff the `before` files - the registers that differ
+(PP_ON_DELAYS, BLC_PWM_*, DP_TP_CTL, DPLL, TRANS_DDI_FUNC_CTL_EDP ...) are what
+the firmware programs and the loader does not.
+
+- On a Radeon boot the iGPU is hidden until AppleSetOs, so `before` only says
+  "no Intel iGPU visible"; the cold state is in `after`.
+- All ones (`0xFFFFFFFF`) means that block was powered down, which is information too.
+- Offsets are gen 9/9.5 with the CNP PCH layout (Linux i915 names); not yet
+  checked against this hardware.
 
 ## VBT injection (keys I, U) - for "no eDP link training" on the iGPU
 
@@ -77,7 +119,7 @@ above), so the Windows Intel driver does not know an eDP panel sits on DDI A.
    -> `t2gmux_vbt.bin` (built from a real coreboot Whiskey Lake VBT, see
    `tools/template/`; only the eDP child on DDI A stays enabled).
 3. Copy `t2gmux_vbt.bin` to the ESP root.
-4. At the countdown press **I** (= D + inject) or **U** (same, Radeon stays powered). The loader copies the
+4. At the countdown press **I** (mux + Radeon OFF + inject) or **U** (same, Radeon stays powered). The loader copies the
    VBT into OpRegion+0x400, re-reads it and writes `t2gmux_after.txt` /
    `t2gmux_inject.txt` so you can see whether it stuck.
 
