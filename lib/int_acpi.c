@@ -170,14 +170,16 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
         return EFI_UNSUPPORTED;
     }
 
-    // ---- 3b. if the SSDT defines a new _WAK (re-route gmux after resume), the DSDT _WAK
-    //          has to be renamed to XWAK as well. Only done when the SSDT mentions XWAK. ----
+    // ---- 3b. DSDT renames. The SSDT may replace _WAK (re-route gmux after resume) and
+    //          _PTS (remember whether the Radeon is off before sleep); each one needs the
+    //          DSDT original renamed to XWAK / XPTS. Only done for names the SSDT mentions. ----
     BOOLEAN WantWak = HasName(File, FileSize, "XWAK");
+    BOOLEAN WantPts = HasName(File, FileSize, "XPTS");
     UINT8* Ds = NULL;
     UINT32 DsLen = 0;
-    UINTN OffW = 0;
-    if (WantWak) {
-        UINTN CntW = 0, CntWX = 0;
+    UINTN OffW = 0, OffP = 0;
+    if (WantWak || WantPts) {
+        UINTN CntW = 0, CntWX = 0, CntP = 0, CntPX = 0;
         Ds = FindDsdt(Xsdt, N);
         if (!Ds || !SigEq(Ds, "DSDT", 4)) {
             S("  DSDT not found via FADT, not patched"); NL();
@@ -187,9 +189,14 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
         DsLen = _INT_Rd32(Ds + ACPI_HDR_LEN);
         OffW = FindBcm(Ds, DsLen, "_WAK", &CntW);
         FindBcm(Ds, DsLen, "XWAK", &CntWX);
+        OffP = FindBcm(Ds, DsLen, "_PTS", &CntP);
+        FindBcm(Ds, DsLen, "XPTS", &CntPX);
         S("  DSDT at "); HX((UINT64)(UINTN)Ds, 8); S(" len "); DC(DsLen);
-        S(", _WAK x"); DC(CntW); S(" at +"); HX(OffW, 4); S(", XWAK x"); DC(CntWX); NL();
-        if (CntW != 1 || OffW == 0 || CntWX != 0 || Sum8(Ds, DsLen) != 0) {
+        S(", _WAK x"); DC(CntW); S(" at +"); HX(OffW, 4); S(", XWAK x"); DC(CntWX);
+        S(", _PTS x"); DC(CntP); S(" at +"); HX(OffP, 4); S(", XPTS x"); DC(CntPX); NL();
+        if (Sum8(Ds, DsLen) != 0 ||
+            (WantWak && (CntW != 1 || OffW == 0 || CntWX != 0)) ||
+            (WantPts && (CntP != 1 || OffP == 0 || CntPX != 0))) {
             S("  unexpected DSDT layout, not patched"); NL();
             _INT_FreePool(BS, FileData);
             return EFI_UNSUPPORTED;
@@ -240,15 +247,16 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
     }
 
     UINT8 OldDsCsum = 0;
-    volatile UINT8* NameW = NULL;
-    if (WantWak) {
-        NameW = Ds + OffW;
+    if (WantWak || WantPts) {
         OldDsCsum = Ds[ACPI_HDR_CSUM];
-        NameW[0] = 'X';
+        if (WantWak) Ds[OffW] = 'X';
+        if (WantPts) Ds[OffP] = 'X';
         Ds[ACPI_HDR_CSUM] = 0;
         Ds[ACPI_HDR_CSUM] = (UINT8)(0 - Sum8(Ds, DsLen));
-        if (NameW[0] != 'X' || Sum8(Ds, DsLen) != 0) {
-            NameW[0] = '_';
+        if ((WantWak && ((volatile UINT8*)Ds)[OffW] != 'X') ||
+            (WantPts && ((volatile UINT8*)Ds)[OffP] != 'X') || Sum8(Ds, DsLen) != 0) {
+            if (WantWak) Ds[OffW] = '_';
+            if (WantPts) Ds[OffP] = '_';
             Ds[ACPI_HDR_CSUM] = OldDsCsum;
             Name4[0] = '_';
             Sa[ACPI_HDR_CSUM] = OldCsum;
@@ -264,8 +272,9 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
     if (EFI_ERROR(Status)) {
         Name4[0] = '_';
         Sa[ACPI_HDR_CSUM] = OldCsum;
-        if (WantWak) {
-            NameW[0] = '_';
+        if (WantWak || WantPts) {
+            if (WantWak) Ds[OffW] = '_';
+            if (WantPts) Ds[OffP] = '_';
             Ds[ACPI_HDR_CSUM] = OldDsCsum;
         }
         S("  InstallConfigurationTable failed ("); HX(Status, 8); S("), SaSsdt rename reverted"); NL();
@@ -289,7 +298,8 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
         }
     }
 
-    S(WantWak ? "  OK: _BCM->XBCM, _WAK->XWAK, new SSDT at " : "  OK: _BCM renamed to XBCM, new SSDT at "); HX((UINT64)(UINTN)NewSsdt, 8);
+    S("  OK: _BCM->XBCM"); if (WantWak) S(", _WAK->XWAK"); if (WantPts) S(", _PTS->XPTS");
+    S(", new SSDT at "); HX((UINT64)(UINTN)NewSsdt, 8);
     S(", new XSDT at "); HX((UINT64)(UINTN)NewXsdt, 8); S(", entries "); DC(N + 1); NL();
 
     _INT_FreePool(BS, FileData);
