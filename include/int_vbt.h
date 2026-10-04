@@ -78,4 +78,7 @@ EFI_STATUS _INT_IgpuForceDdiA4Lanes(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandl
 EFI_STATUS _INT_DumpIgpuRegs(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                              _INT_Rep* R);
 
+// TRUE if the Intel iGPU is visible right now (firmware booted from the iGPU).
+BOOLEAN _INT_IgpuVisible(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle);
+
 #endif

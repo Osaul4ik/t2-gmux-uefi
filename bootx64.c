@@ -414,7 +414,27 @@ DoVbtDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruct
     _INT_FreePool(BS, Buf);
 }
 
-// Register snapshot (\\t2gmux_regs_<tag>.txt): iGPU display state at this moment.
+// Output file names: \t2gmux_<key>_<boot>_<what>, e.g. \t2gmux_I_rad_after.txt.
+//   key  = the key that was pressed (I, U or B)
+//   boot = "igpu" if the Intel iGPU was already visible before AppleSetOs
+//          (firmware booted from the iGPU), "rad" on a Radeon boot
+// so runs with different keys / boot GPUs never overwrite each other.
+static VOID
+MakeName(CHAR16 *Out, CHAR16 Key, const CHAR16 *Boot, const CHAR16 *What)
+{
+    static const CHAR16 Pre[] = L"\\t2gmux_";
+    UINTN n = 0;
+
+    for (UINTN i = 0; Pre[i]; i++) Out[n++] = Pre[i];
+    Out[n++] = Key;
+    Out[n++] = L'_';
+    for (UINTN i = 0; Boot[i]; i++) Out[n++] = Boot[i];
+    Out[n++] = L'_';
+    for (UINTN i = 0; What[i]; i++) Out[n++] = What[i];
+    Out[n] = 0;
+}
+
+// Register snapshot (\\t2gmux_<key>_<boot>_regs_<tag>.txt): iGPU display state at this moment.
 // Compare "before" of a Radeon boot with "before" of an iGPU boot (key R first)
 // to see what the Apple firmware programs when it lights the panel itself.
 static VOID
@@ -828,20 +848,40 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         );
     }
 
+    // File name tag: pressed key + which GPU the firmware booted from (see MakeName).
+    CHAR16 KeyTag = L'?';
+    const CHAR16 *BootTag = L"rad";
+    CHAR16 N1[64], N2[64], N3[64], N4[64];
+    if (DoCleanDump)      KeyTag = L'B';
+    else if (DoDgpuPowerOff && DoInject) KeyTag = L'I';
+    else if (DoInject)    KeyTag = L'U';
+    if (DoDump || DoCleanDump) {
+        if (_INT_IgpuVisible(BS, ImageHandle))
+            BootTag = L"igpu";
+        MakeName(N1, KeyTag, BootTag, L"*");
+        _INT_SimpleTextGraphicsPrint(&gs, 0, 23, TRUE, TRUE, L"files: %s", N1);
+    }
+
     // Must come after every key that can set DoDump (I, U), otherwise I/U
     // never write the "before" report.
     if (DoDump) {
-        DoVbtDump(BS, ImageHandle, &gs, L"\\t2gmux_before.txt", L"\\t2gmux_before_opregion.bin",
-                  L"\\t2gmux_before_vbt.bin", L"before", 11);
-        DoRegsDump(BS, ImageHandle, &gs, L"\\t2gmux_regs_before.txt", L"before", 21);
+        MakeName(N1, KeyTag, BootTag, L"before.txt");
+        MakeName(N2, KeyTag, BootTag, L"before_opregion.bin");
+        MakeName(N3, KeyTag, BootTag, L"before_vbt.bin");
+        DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"before", 11);
+        MakeName(N4, KeyTag, BootTag, L"regs_before.txt");
+        DoRegsDump(BS, ImageHandle, &gs, N4, L"before", 21);
     }
 
     // Key B: clean dump. Nothing was touched above (no AppleSetOs, mux, rail or
     // injection), so these files show the settings exactly as the firmware left them.
     if (DoCleanDump) {
-        DoVbtDump(BS, ImageHandle, &gs, L"\\t2gmux_clean.txt", L"\\t2gmux_clean_opregion.bin",
-                  L"\\t2gmux_clean_vbt.bin", L"clean", 11);
-        DoRegsDump(BS, ImageHandle, &gs, L"\\t2gmux_regs_clean.txt", L"clean", 21);
+        MakeName(N1, KeyTag, BootTag, L"clean.txt");
+        MakeName(N2, KeyTag, BootTag, L"clean_opregion.bin");
+        MakeName(N3, KeyTag, BootTag, L"clean_vbt.bin");
+        DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"clean", 11);
+        MakeName(N4, KeyTag, BootTag, L"regs_clean.txt");
+        DoRegsDump(BS, ImageHandle, &gs, N4, L"clean", 21);
         for (UINT16 j = 0; j < 800; j++) {
             BS->Stall(10000);   // ~8 s to read the summary
         }
@@ -1009,7 +1049,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             // Same iGPU-side setup the firmware does when it boots from the iGPU
             // (see _INT_IgpuForceDdiA4Lanes); the mux alone does not provide it.
             LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
-            _INT_WriteEspFile(BS, ImageHandle, L"\\t2gmux_inject.txt", RBuf, IR.len);
+            MakeName(N1, KeyTag, BootTag, L"inject.txt");
+            _INT_WriteEspFile(BS, ImageHandle, N1, RBuf, IR.len);
             _INT_FreePool(BS, RBuf);
         }
         _INT_SimpleTextGraphicsPrint(
@@ -1023,9 +1064,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
 
     if (DoDump) {
-        DoVbtDump(BS, ImageHandle, &gs, L"\\t2gmux_after.txt", L"\\t2gmux_after_opregion.bin",
-                  L"\\t2gmux_after_vbt.bin", L"after", 15);
-        DoRegsDump(BS, ImageHandle, &gs, L"\\t2gmux_regs_after.txt", L"after", 22);
+        MakeName(N1, KeyTag, BootTag, L"after.txt");
+        MakeName(N2, KeyTag, BootTag, L"after_opregion.bin");
+        MakeName(N3, KeyTag, BootTag, L"after_vbt.bin");
+        DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"after", 15);
+        MakeName(N4, KeyTag, BootTag, L"regs_after.txt");
+        DoRegsDump(BS, ImageHandle, &gs, N4, L"after", 22);
         for (UINT16 j = 0; j < 800; j++) {
             BS->Stall(10000);   // ~8 s to read the summary
         }

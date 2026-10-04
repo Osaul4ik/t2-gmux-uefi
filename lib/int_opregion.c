@@ -558,3 +558,12 @@ EFI_STATUS _INT_DumpIgpuRegs(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
     S("Regs: "); DC(n); S(" registers, "); DC(ones); S(" read as all ones"); NL();
     return EFI_SUCCESS;
 }
+
+// TRUE if an Intel display controller is already visible through PciIo, i.e. the
+// firmware booted from the iGPU (on a Radeon boot it stays hidden until AppleSetOs).
+BOOLEAN _INT_IgpuVisible(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle)
+{
+    UINT32 Id = 0;
+    EFI_STATUS Status;
+    return FindIgpu(BS, ImageHandle, &Id, &Status) != NULL;
+}

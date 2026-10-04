@@ -60,6 +60,27 @@ docker build -t apple_set_os_loader .
 docker run --rm -v "$(pwd):/build" apple_set_os_loader make clean all
 ```
 
+## Output file names
+
+Every dump file is written to the ESP root as
+
+    t2gmux_<key>_<boot>_<what>
+
+- `<key>` = the key you pressed: `I`, `U` or `B`
+- `<boot>` = `igpu` if the Intel iGPU was already visible before AppleSetOs
+  (the firmware booted from the iGPU, e.g. after **R** + restart), otherwise `rad`
+  (Radeon boot)
+- `<what>` = `before.txt`, `before_opregion.bin`, `before_vbt.bin`,
+  `after.txt`, `after_opregion.bin`, `after_vbt.bin`, `regs_before.txt`,
+  `regs_after.txt`, `inject.txt` (I/U) or `clean.txt`, `clean_opregion.bin`,
+  `clean_vbt.bin`, `regs_clean.txt` (B)
+
+Example: `t2gmux_I_rad_after.txt` = key I on a Radeon boot,
+`t2gmux_B_igpu_regs_clean.txt` = clean register dump after **R**. Runs with a
+different key or boot GPU never overwrite each other (the same combination run
+twice does). The countdown screen shows the prefix on its last line
+(`files: \t2gmux_I_rad_*`). The input file `t2gmux_vbt.bin` keeps its name.
+
 ## OpRegion / VBT dump (keys I, U)
 
 Diagnoses "no eDP link training when the Intel driver loads": the Intel
@@ -69,8 +90,10 @@ timings from the VBT in the OpRegion (PCI config 0xFC `ASLS` of the iGPU).
 Files written to the ESP root (before = before `apple_set_os`, after = after
 apple_set_os + gmux/rail actions; keys I and U write both):
 
-- `t2gmux_before.txt` / `t2gmux_after.txt` – readable report (gmux readback, OpRegion, VBT child devices, eDP block)
-- `t2gmux_*_opregion.bin`, `t2gmux_*_vbt.bin` – raw data
+- `before.txt` / `after.txt` – readable report (gmux readback, OpRegion, VBT child devices, eDP block)
+- `*_opregion.bin`, `*_vbt.bin` – raw data
+
+All file names follow the scheme in "Output file names" below.
 
 Share the `.txt` and `_vbt.bin` files to analyse them. Parser is checked only
 against a synthetic VBT, not yet against real hardware.
@@ -80,8 +103,8 @@ against a synthetic VBT, not yet against real hardware.
 B changes nothing: no AppleSetOs, no mux, no rail, no injection, no NVRAM. It
 writes the same reports as I/U but for the untouched state, with the tag `clean`:
 
-- `t2gmux_clean.txt`, `t2gmux_clean_opregion.bin`, `t2gmux_clean_vbt.bin` (gmux readback, OpRegion, VBT)
-- `t2gmux_regs_clean.txt` (iGPU display registers)
+- `clean.txt`, `clean_opregion.bin`, `clean_vbt.bin` (gmux readback, OpRegion, VBT)
+- `regs_clean.txt` (iGPU display registers)
 
 Use it after **R** + restart: the firmware has lit the panel from the iGPU, so
 this is the reference state to compare against the Radeon-boot `after` files.
@@ -91,8 +114,8 @@ report "no Intel iGPU visible" (the gmux readback is still written).
 ## iGPU register snapshot (keys I, U)
 
 Besides the OpRegion/VBT files, I and U write two register snapshots of the
-Intel display engine (BAR0): `t2gmux_regs_before.txt` (before AppleSetOs and the
-mux) and `t2gmux_regs_after.txt` (after mux, rail and injection). They hold power
+Intel display engine (BAR0): `regs_before.txt` (before AppleSetOs and the
+mux) and `regs_after.txt` (after mux, rail and injection). They hold power
 wells, CDCLK/DPLL, DDI A (`DDI_BUF_CTL`, `DP_TP_*`, AUX), the eDP transcoder
 (function control, timings, M/N), pipe A/plane 1, the panel power sequencer
 (`PP_*`) and the backlight PWM (`BLC_PWM_*`).
@@ -120,15 +143,15 @@ above), so the Windows Intel driver does not know an eDP panel sits on DDI A.
    `tools/template/`; only the eDP child on DDI A stays enabled).
 3. Copy `t2gmux_vbt.bin` to the ESP root.
 4. At the countdown press **I** (mux + Radeon OFF + inject) or **U** (same, Radeon stays powered). The loader copies the
-   VBT into OpRegion+0x400, re-reads it and writes `t2gmux_after.txt` /
-   `t2gmux_inject.txt` so you can see whether it stuck.
+   VBT into OpRegion+0x400, re-reads it and writes `after.txt` /
+   `inject.txt` (with the prefix described in "Output file names") so you can see whether it stuck.
 
 I and **U** also set
 `DDI_BUF_CTL(A).DDI_A_4_LANES` (bit 4, GTTMMADR+0x64000) in the iGPU. On gen < 11
 i915 takes the DDI A lane limit from that bit, Apple's firmware sets it only when
 it lights the panel from the iGPU, and with the dGPU as boot GPU it stays clear -
 the t2linux patch "i915: 4 lane quirk for mbp15,1" works around exactly that.
-The result (register value before/readback) is in `t2gmux_inject.txt`. The write is
+The result (register value before/readback) is in `inject.txt`. The write is
 skipped if BAR0 is unassigned or the register reads all ones.
 
 If the panel stays dark try `--lanes 2` / `--rate hbr` (the real values are in
