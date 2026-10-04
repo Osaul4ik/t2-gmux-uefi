@@ -65,6 +65,29 @@ static UINTN FindBcm(const UINT8* t, UINTN len, const char* nm, UINTN* Count)
     return pos;
 }
 
+// Does the file contain the 4-byte name anywhere (used to see if the SSDT wants XWAK).
+static BOOLEAN HasName(const UINT8* t, UINTN len, const char* nm)
+{
+    for (UINTN i = 0; i + 4 <= len; i++)
+        if (SigEq(t + i, nm, 4)) return TRUE;
+    return FALSE;
+}
+
+// DSDT address from the FADT ("FACP"): X_Dsdt (+140) if present, else Dsdt (+40).
+static UINT8* FindDsdt(UINT8* Xsdt, UINTN N)
+{
+    for (UINTN i = 0; i < N; i++) {
+        UINT8* T = (UINT8*)(UINTN)_INT_Rd64(Xsdt + ACPI_HDR_SIZE + i * 8);
+        if (!T || !SigEq(T, "FACP", 4)) continue;
+        UINT32 L = _INT_Rd32(T + ACPI_HDR_LEN);
+        UINT64 D = 0;
+        if (L >= 148) D = _INT_Rd64(T + 140);
+        if (D == 0 && L >= 44) D = _INT_Rd32(T + 40);
+        return (UINT8*)(UINTN)D;
+    }
+    return NULL;
+}
+
 EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
                                EFI_HANDLE ImageHandle, CHAR16* Name, _INT_Rep* R)
 {
@@ -147,6 +170,32 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
         return EFI_UNSUPPORTED;
     }
 
+    // ---- 3b. if the SSDT defines a new _WAK (re-route gmux after resume), the DSDT _WAK
+    //          has to be renamed to XWAK as well. Only done when the SSDT mentions XWAK. ----
+    BOOLEAN WantWak = HasName(File, FileSize, "XWAK");
+    UINT8* Ds = NULL;
+    UINT32 DsLen = 0;
+    UINTN OffW = 0;
+    if (WantWak) {
+        UINTN CntW = 0, CntWX = 0;
+        Ds = FindDsdt(Xsdt, N);
+        if (!Ds || !SigEq(Ds, "DSDT", 4)) {
+            S("  DSDT not found via FADT, not patched"); NL();
+            _INT_FreePool(BS, FileData);
+            return EFI_NOT_FOUND;
+        }
+        DsLen = _INT_Rd32(Ds + ACPI_HDR_LEN);
+        OffW = FindBcm(Ds, DsLen, "_WAK", &CntW);
+        FindBcm(Ds, DsLen, "XWAK", &CntWX);
+        S("  DSDT at "); HX((UINT64)(UINTN)Ds, 8); S(" len "); DC(DsLen);
+        S(", _WAK x"); DC(CntW); S(" at +"); HX(OffW, 4); S(", XWAK x"); DC(CntWX); NL();
+        if (CntW != 1 || OffW == 0 || CntWX != 0 || Sum8(Ds, DsLen) != 0) {
+            S("  unexpected DSDT layout, not patched"); NL();
+            _INT_FreePool(BS, FileData);
+            return EFI_UNSUPPORTED;
+        }
+    }
+
     // ---- 4. allocate everything that can fail BEFORE touching firmware tables ----
     UINT8* NewSsdt = NULL;
     UINT8* NewXsdt = NULL;
@@ -190,11 +239,35 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
         return EFI_ACCESS_DENIED;
     }
 
+    UINT8 OldDsCsum = 0;
+    volatile UINT8* NameW = NULL;
+    if (WantWak) {
+        NameW = Ds + OffW;
+        OldDsCsum = Ds[ACPI_HDR_CSUM];
+        NameW[0] = 'X';
+        Ds[ACPI_HDR_CSUM] = 0;
+        Ds[ACPI_HDR_CSUM] = (UINT8)(0 - Sum8(Ds, DsLen));
+        if (NameW[0] != 'X' || Sum8(Ds, DsLen) != 0) {
+            NameW[0] = '_';
+            Ds[ACPI_HDR_CSUM] = OldDsCsum;
+            Name4[0] = '_';
+            Sa[ACPI_HDR_CSUM] = OldCsum;
+            S("  DSDT memory is not writable, aborted (nothing changed)"); NL();
+            BS->FreePool(NewSsdt); BS->FreePool(NewXsdt); BS->FreePool(NewRsdp);
+            _INT_FreePool(BS, FileData);
+            return EFI_ACCESS_DENIED;
+        }
+    }
+
     // ---- 6. publish the new RSDP (config table), best-effort update of the old one ----
     Status = BS->InstallConfigurationTable(&acpi20, NewRsdp);
     if (EFI_ERROR(Status)) {
         Name4[0] = '_';
         Sa[ACPI_HDR_CSUM] = OldCsum;
+        if (WantWak) {
+            NameW[0] = '_';
+            Ds[ACPI_HDR_CSUM] = OldDsCsum;
+        }
         S("  InstallConfigurationTable failed ("); HX(Status, 8); S("), SaSsdt rename reverted"); NL();
         BS->FreePool(NewSsdt); BS->FreePool(NewXsdt); BS->FreePool(NewRsdp);
         _INT_FreePool(BS, FileData);
@@ -216,7 +289,7 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
         }
     }
 
-    S("  OK: _BCM renamed to XBCM, new SSDT at "); HX((UINT64)(UINTN)NewSsdt, 8);
+    S(WantWak ? "  OK: _BCM->XBCM, _WAK->XWAK, new SSDT at " : "  OK: _BCM renamed to XBCM, new SSDT at "); HX((UINT64)(UINTN)NewSsdt, 8);
     S(", new XSDT at "); HX((UINT64)(UINTN)NewXsdt, 8); S(", entries "); DC(N + 1); NL();
 
     _INT_FreePool(BS, FileData);
