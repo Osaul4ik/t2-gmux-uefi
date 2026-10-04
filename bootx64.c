@@ -596,6 +596,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     //   D = gmux panel->iGPU + dGPU rail OFF + OpRegion/VBT dump
     //   I = D + inject t2gmux_vbt.bin + DDI A 4 lanes
     //   U = like I, but the Radeon rail stays ON
+    //   Space (or any other key) = skip the countdown, plain boot
     // Default (no key, or any other key): plain boot - no AppleSetOs, no mux, no rail, no NVRAM
     BOOLEAN DoGmuxSwitch = FALSE;
     BOOLEAN DoDgpuPowerOff = FALSE;
@@ -617,7 +618,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 7, FALSE, TRUE,
-        L"R=NVRAM dGPU+restart D=mux+off+dump I=D+inject U=mux+inject"
+        L"R=NVRAM dGPU+restart D=mux+off+dump I=D+inject U=mux+inject Space=boot now"
     );
 
 
