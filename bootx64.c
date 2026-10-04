@@ -289,46 +289,7 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
     return ok;
 }
 
-#ifndef EFI_VARIABLE_NON_VOLATILE
-#define EFI_VARIABLE_NON_VOLATILE       0x00000001
-#define EFI_VARIABLE_BOOTSERVICE_ACCESS 0x00000002
-#define EFI_VARIABLE_RUNTIME_ACCESS     0x00000004
-#endif
-
-// Firmware boot GPU preference (forum "only via EFI" path).
-// GUID fa4ce28d-b62f-4c99-9cc3-6815686e30f9, name gpu-power-prefs,
-// first data byte 1=iGPU. Takes effect on the next cold boot.
-//   key R: variable written (iGPU first, the firmware lights the panel from Intel)
-//   key D: variable deleted (default behaviour, Radeon is the boot GPU)
-static const EFI_GUID GpuPrefsGuid = {
-    0xfa4ce28d, 0xb62f, 0x4c99,
-    { 0x9c, 0xc3, 0x68, 0x15, 0x68, 0x6e, 0x30, 0xf9 }
-};
-#define GPU_PREFS_ATTR \
-    (EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS)
-
-static EFI_STATUS
-SetGpuPowerPrefsIgpu(EFI_RUNTIME_SERVICES *RT)
-{
-    UINT8 Data[4] = { 0x01, 0x00, 0x00, 0x00 };
-    EFI_GUID Guid = GpuPrefsGuid;
-
-    return RT->SetVariable(L"gpu-power-prefs", &Guid, GPU_PREFS_ATTR, sizeof(Data), Data);
-}
-
-// Delete the variable (SetVariable with DataSize 0). EFI_NOT_FOUND means it was
-// not there, which is the state we want, so it counts as success.
-static EFI_STATUS
-ClearGpuPowerPrefs(EFI_RUNTIME_SERVICES *RT)
-{
-    EFI_GUID Guid = GpuPrefsGuid;
-    EFI_STATUS st = RT->SetVariable(L"gpu-power-prefs", &Guid, GPU_PREFS_ATTR, 0, NULL);
-
-    return (st == EFI_NOT_FOUND) ? EFI_SUCCESS : st;
-}
-
-
-// ---- OpRegion / VBT diagnostic dump (keys I / U) ----
+// ---- OpRegion / VBT diagnostic dump (key L) ----
 // Writes <tag>.txt (readable report), <tag>.bin (raw OpRegion) and
 // <tag>_vbt.bin (raw VBT) to the ESP root and shows a short summary.
 static VOID
@@ -415,20 +376,17 @@ DoVbtDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruct
     _INT_FreePool(BS, Buf);
 }
 
-// Output file names: \t2gmux_<key>_<boot>_<what>, e.g. \t2gmux_I_rad_after.txt.
-//   key  = the key that was pressed (I, U or B)
+// Output file names: \t2gmux_L_<boot>_<what>, e.g. \t2gmux_L_rad_after.txt.
 //   boot = "igpu" if the Intel iGPU was already visible before AppleSetOs
 //          (firmware booted from the iGPU), "rad" on a Radeon boot
-// so runs with different keys / boot GPUs never overwrite each other.
+// so runs with different boot GPUs never overwrite each other.
 static VOID
-MakeName(CHAR16 *Out, CHAR16 Key, const CHAR16 *Boot, const CHAR16 *What)
+MakeName(CHAR16 *Out, const CHAR16 *Boot, const CHAR16 *What)
 {
-    static const CHAR16 Pre[] = L"\\t2gmux_";
+    static const CHAR16 Pre[] = L"\\t2gmux_L_";
     UINTN n = 0;
 
     for (UINTN i = 0; Pre[i]; i++) Out[n++] = Pre[i];
-    Out[n++] = Key;
-    Out[n++] = L'_';
     for (UINTN i = 0; Boot[i]; i++) Out[n++] = Boot[i];
     Out[n++] = L'_';
     for (UINTN i = 0; What[i]; i++) Out[n++] = What[i];
@@ -436,8 +394,7 @@ MakeName(CHAR16 *Out, CHAR16 Key, const CHAR16 *Boot, const CHAR16 *What)
 }
 
 // Register snapshot (\\t2gmux_<key>_<boot>_regs_<tag>.txt): iGPU display state at this moment.
-// Compare "before" of a Radeon boot with "before" of an iGPU boot (key R first)
-// to see what the Apple firmware programs when it lights the panel itself.
+// Compare "before" and "after" to see what the loader changes in the iGPU state.
 static VOID
 DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruct *gs,
            CHAR16 *FileName, CHAR16 *Label, UINTN Row)
@@ -649,21 +606,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
 
     // Keys (after countdown):
-    //   R = NVRAM gpu-power-prefs = iGPU first (variable written), then restart
-    //   D = NVRAM gpu-power-prefs deleted (Radeon boot GPU, default), then restart
-    //   I = full switch to the iGPU: mux + Radeon rail OFF + inject t2gmux_vbt.bin + DDI A 4 lanes + dump
-    //   U = same as I, but the Radeon rail stays ON
-    //   B = dump only ("clean" state): no AppleSetOs, no mux, no rail, no inject, no NVRAM
+    //   I = full switch to the iGPU: mux + Radeon rail OFF + inject t2gmux_vbt.bin + DDI A 4 lanes (no log files)
+    //   L = same as I, but also writes the OpRegion/VBT/register dump files (before/after/inject)
     //   Space (or any other key) = skip the countdown, plain boot
-    // Default (no key, or any other key): plain boot - no AppleSetOs, no mux, no rail, no NVRAM
-    BOOLEAN DoGmuxSwitch = FALSE;
-    BOOLEAN DoDgpuPowerOff = FALSE;
-    BOOLEAN DoWritePrefsIgpu = FALSE;
-    BOOLEAN DoClearPrefs = FALSE;
-    BOOLEAN DoSetOs = FALSE;   // AppleSetOs only for I / U (iGPU must become visible)
-    BOOLEAN DoDump = FALSE;
-    BOOLEAN DoInject = FALSE;
-    BOOLEAN DoCleanDump = FALSE;  // key B: dump only, nothing is touched
+    // Default (no key, or any other key): plain boot - no AppleSetOs, no mux, no rail
+    BOOLEAN DoSwitch = FALSE;  // I / L: AppleSetOs + mux->iGPU + Radeon rail OFF + VBT inject
+    BOOLEAN DoDump = FALSE;    // key L: write dump / log files
 
     if (AppleSetOsHandleCount == 0) {
         _INT_SimpleTextGraphicsPrint(
@@ -673,12 +621,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     } else {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 2, TRUE, TRUE,
-            L"No key = plain boot (no AppleSetOs, no gmux). AppleSetOs only with D/I/U"
+            L"No key = plain boot (no AppleSetOs, no gmux). AppleSetOs only with I/L"
         );
     }
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 7, FALSE, TRUE,
-        L"R=prefs iGPU D=prefs Radeon (+reboot) I=iGPU,Radeon off U=iGPU,Radeon on B=dump only"
+        L"I=iGPU,Radeon off L=same as I + log files"
     );
 
 
@@ -798,98 +746,48 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         }
     }
 
-    // R / D / I / U - see UI comments above
-    if (Key.UnicodeChar == L'r' || Key.UnicodeChar == L'R') {
-        // NVRAM only; mux/rail left alone. The system restarts after the write.
-        DoWritePrefsIgpu = TRUE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"R: NVRAM gpu-power-prefs = iGPU first, then restart"
-        );
-    }
-    if (Key.UnicodeChar == L'd' || Key.UnicodeChar == L'D') {
-        // NVRAM only; delete the variable -> Radeon is the boot GPU again
-        DoClearPrefs = TRUE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"D: NVRAM gpu-power-prefs deleted (Radeon first), then restart"
-        );
-    }
+    // I / L - see UI comments above
     if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
-        // full switch to the iGPU, Radeon rail OFF
-        DoGmuxSwitch = TRUE;
-        DoSetOs = TRUE;
-        DoDgpuPowerOff = TRUE;
-        DoDump = TRUE;
-        DoInject = TRUE;
+        // full switch to the iGPU, Radeon rail OFF, no log files
+        DoSwitch = TRUE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
-            L"I: mux->iGPU + Radeon OFF + inject t2gmux_vbt.bin + dump"
+            L"I: mux->iGPU + Radeon OFF + inject t2gmux_vbt.bin"
         );
     }
-    if (Key.UnicodeChar == L'u' || Key.UnicodeChar == L'U') {
-        // full switch to the iGPU, Radeon rail stays ON
-        DoGmuxSwitch = TRUE;
-        DoSetOs = TRUE;
-        DoDgpuPowerOff = FALSE;
+    if (Key.UnicodeChar == L'l' || Key.UnicodeChar == L'L') {
+        // same as I, plus dump / log files
+        DoSwitch = TRUE;
         DoDump = TRUE;
-        DoInject = TRUE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
-            L"U: mux->iGPU (Radeon stays ON) + inject t2gmux_vbt.bin + dump"
+            L"L: mux->iGPU + Radeon OFF + inject t2gmux_vbt.bin + dump"
         );
     }
 
-    if (Key.UnicodeChar == L'b' || Key.UnicodeChar == L'B') {
-        // dump only: AppleSetOs is skipped, mux/rail/VBT/NVRAM untouched
-        DoCleanDump = TRUE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"B: dump only (no AppleSetOs, nothing switched)"
-        );
-    }
-
-    // File name tag: pressed key + which GPU the firmware booted from (see MakeName).
-    CHAR16 KeyTag = L'?';
+    // File name tag: which GPU the firmware booted from (see MakeName).
     const CHAR16 *BootTag = L"rad";
     CHAR16 N1[64], N2[64], N3[64], N4[64];
-    if (DoCleanDump)      KeyTag = L'B';
-    else if (DoDgpuPowerOff && DoInject) KeyTag = L'I';
-    else if (DoInject)    KeyTag = L'U';
-    if (DoDump || DoCleanDump) {
+    if (DoDump) {
         if (_INT_IgpuVisible(BS, ImageHandle))
             BootTag = L"igpu";
-        MakeName(N1, KeyTag, BootTag, L"*");
+        MakeName(N1, BootTag, L"*");
         _INT_SimpleTextGraphicsPrint(&gs, 0, 23, TRUE, TRUE, L"files: %s", N1);
     }
 
-    // Must come after every key that can set DoDump (I, U), otherwise I/U
-    // never write the "before" report.
+    // Must come after the key that sets DoDump (L), otherwise L
+    // never writes the "before" report.
     if (DoDump) {
-        MakeName(N1, KeyTag, BootTag, L"before.txt");
-        MakeName(N2, KeyTag, BootTag, L"before_opregion.bin");
-        MakeName(N3, KeyTag, BootTag, L"before_vbt.bin");
+        MakeName(N1, BootTag, L"before.txt");
+        MakeName(N2, BootTag, L"before_opregion.bin");
+        MakeName(N3, BootTag, L"before_vbt.bin");
         DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"before", 11);
-        MakeName(N4, KeyTag, BootTag, L"regs_before.txt");
+        MakeName(N4, BootTag, L"regs_before.txt");
         DoRegsDump(BS, ImageHandle, &gs, N4, L"before", 21);
     }
 
-    // Key B: clean dump. Nothing was touched above (no AppleSetOs, mux, rail or
-    // injection), so these files show the settings exactly as the firmware left them.
-    if (DoCleanDump) {
-        MakeName(N1, KeyTag, BootTag, L"clean.txt");
-        MakeName(N2, KeyTag, BootTag, L"clean_opregion.bin");
-        MakeName(N3, KeyTag, BootTag, L"clean_vbt.bin");
-        DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"clean", 11);
-        MakeName(N4, KeyTag, BootTag, L"regs_clean.txt");
-        DoRegsDump(BS, ImageHandle, &gs, N4, L"clean", 21);
-        for (UINT16 j = 0; j < 800; j++) {
-            BS->Stall(10000);   // ~8 s to read the summary
-        }
-    }
-
-    // load apple_set_os - only when I / U was pressed; no key = plain Windows boot
-    if (!DoSetOs) {
+    // load apple_set_os - only when I / L was pressed; no key = plain Windows boot
+    if (!DoSwitch) {
         AppleSetOsHandleCount = 0;
     }
     for(UINTN i = 0; i < AppleSetOsHandleCount; i++) {
@@ -940,21 +838,17 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     _INT_FreePool(BS, AppleSetOsHandleBuf);
 
-    // ---- Optional gmux panel switch and/or dGPU rail OFF ----
+    // ---- I / L: gmux panel switch, dGPU rail OFF, VBT inject ----
     // Never power the dGPU rail back on from Windows after OFF (known hang on this HW).
-    BOOLEAN MuxOk = TRUE;
-    GMUX_IRQ_SAVE IrqSave;
-    BOOLEAN IrqActive = (BOOLEAN)(DoGmuxSwitch || DoDgpuPowerOff);
-
-    if (IrqActive)
+    if (DoSwitch) {
+        GMUX_IRQ_SAVE IrqSave;
         GmuxIrqBegin(BS, &IrqSave);
 
-    if (DoGmuxSwitch) {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
             L"Gmux: panel -> iGPU..."
         );
-        MuxOk = GmuxSwitchToIGD(BS);
+        BOOLEAN MuxOk = GmuxSwitchToIGD(BS);
         if (MuxOk) {
             _INT_SimpleTextGraphicsPrint(
                 &gs, 0, 7, TRUE, TRUE,
@@ -966,79 +860,45 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 L"Gmux: route FAILED (no gmux or readback != iGPU)"
             );
         }
-    }
 
-    if (DoDgpuPowerOff && DoGmuxSwitch && !MuxOk) {
-        // Cutting the rail while the panel is still routed to the Radeon blacks the screen.
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 8, TRUE, TRUE,
-            L"Gmux: dGPU rail OFF SKIPPED (panel not confirmed on iGPU)"
-        );
-    } else if (DoDgpuPowerOff) {
-        BOOLEAN PowerEvent = FALSE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 8, TRUE, TRUE,
-            L"Gmux: powering OFF dGPU rail (0x50)..."
-        );
-        if (GmuxSetDiscretePower(BS, FALSE, &PowerEvent)) {
+        if (!MuxOk) {
+            // Cutting the rail while the panel is still routed to the Radeon blacks the screen.
             _INT_SimpleTextGraphicsPrint(
                 &gs, 0, 8, TRUE, TRUE,
-                L"Gmux: dGPU rail OFF OK (power event %s)",
-                PowerEvent ? L"seen" : L"not seen, fixed delay"
+                L"Gmux: dGPU rail OFF SKIPPED (panel not confirmed on iGPU)"
             );
         } else {
+            BOOLEAN PowerEvent = FALSE;
             _INT_SimpleTextGraphicsPrint(
                 &gs, 0, 8, TRUE, TRUE,
-                L"Gmux: dGPU rail OFF FAILED"
+                L"Gmux: powering OFF dGPU rail (0x50)..."
             );
+            if (GmuxSetDiscretePower(BS, FALSE, &PowerEvent)) {
+                _INT_SimpleTextGraphicsPrint(
+                    &gs, 0, 8, TRUE, TRUE,
+                    L"Gmux: dGPU rail OFF OK (power event %s)",
+                    PowerEvent ? L"seen" : L"not seen, fixed delay"
+                );
+            } else {
+                _INT_SimpleTextGraphicsPrint(
+                    &gs, 0, 8, TRUE, TRUE,
+                    L"Gmux: dGPU rail OFF FAILED"
+                );
+            }
         }
-    }
 
-    if (IrqActive) {
         UINT8 Left = GmuxIrqEnd(BS, &IrqSave);
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 9, TRUE, TRUE,
             L"Gmux: irq status cleared (was %x), mask restored=%s",
             (UINTN)Left, IrqSave.MaskValid ? L"yes" : L"no"
         );
-    }
 
-    if (DoGmuxSwitch || DoDgpuPowerOff) {
         for (UINT16 j = 0; j < 80; j++) {
             BS->Stall(10000);
         }
-    }
 
-    // NVRAM change (key R writes, key D deletes) is independent of gmux; the
-    // system restarts after it
-    if (DoWritePrefsIgpu || DoClearPrefs) {
-        EFI_STATUS st = DoWritePrefsIgpu
-            ? SetGpuPowerPrefsIgpu(SystemTable->RuntimeServices)
-            : ClearGpuPowerPrefs(SystemTable->RuntimeServices);
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 9, TRUE, TRUE,
-            L"NVRAM gpu-power-prefs %s: %s (%lX)",
-            DoWritePrefsIgpu ? L"=iGPU" : L"deleted",
-            EFI_ERROR(st) ? L"FAIL" : L"OK",
-            st
-        );
-        for (UINT16 j = 0; j < 100; j++) {
-            BS->Stall(10000);
-        }
-        if (!EFI_ERROR(st)) {
-            _INT_SimpleTextGraphicsPrint(
-                &gs, 0, 10, TRUE, TRUE,
-                L"Restarting..."
-            );
-            for (UINT16 j = 0; j < 100; j++) {
-                BS->Stall(10000);
-            }
-            SystemTable->RuntimeServices->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
-        }
-        // write failed (or reset returned): do not restart, continue with a normal boot
-    }
-
-    if (DoInject) {
+        // VBT inject + DDI A 4 lanes + optional ACPI patch
         const UINTN RCap = 8192;
         CHAR8 *RBuf = (CHAR8 *)_INT_AllocatePool(BS, RCap);
         EFI_STATUS IS = EFI_OUT_OF_RESOURCES;
@@ -1053,8 +913,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
             // ACPI patch (brightness via gmux): \SSDT_IGPU.aml from the ESP root, optional.
             AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, L"\\SSDT_IGPU.aml", &IR);
-            MakeName(N1, KeyTag, BootTag, L"inject.txt");
-            _INT_WriteEspFile(BS, ImageHandle, N1, RBuf, IR.len);
+            if (DoDump) {
+                MakeName(N1, BootTag, L"inject.txt");
+                _INT_WriteEspFile(BS, ImageHandle, N1, RBuf, IR.len);
+            }
             _INT_FreePool(BS, RBuf);
         }
         _INT_SimpleTextGraphicsPrint(
@@ -1073,11 +935,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
 
     if (DoDump) {
-        MakeName(N1, KeyTag, BootTag, L"after.txt");
-        MakeName(N2, KeyTag, BootTag, L"after_opregion.bin");
-        MakeName(N3, KeyTag, BootTag, L"after_vbt.bin");
+        MakeName(N1, BootTag, L"after.txt");
+        MakeName(N2, BootTag, L"after_opregion.bin");
+        MakeName(N3, BootTag, L"after_vbt.bin");
         DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"after", 15);
-        MakeName(N4, KeyTag, BootTag, L"regs_after.txt");
+        MakeName(N4, BootTag, L"regs_after.txt");
         DoRegsDump(BS, ImageHandle, &gs, N4, L"after", 22);
         for (UINT16 j = 0; j < 800; j++) {
             BS->Stall(10000);   // ~8 s to read the summary
