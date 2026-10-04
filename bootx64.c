@@ -608,9 +608,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     // Keys (after countdown):
     //   I = full switch to the iGPU: mux + Radeon rail OFF + inject t2gmux_vbt.bin + DDI A 4 lanes (no log files)
     //   L = same as I, but also writes the OpRegion/VBT/register dump files (before/after/inject)
+    //   A = AppleSetOs only: no gmux, no rail, no VBT/DDI/ACPI patches, no log files
     //   Space (or any other key) = skip the countdown, plain boot
     // Default (no key, or any other key): plain boot - no AppleSetOs, no mux, no rail
-    BOOLEAN DoSwitch = FALSE;  // I / L: AppleSetOs + mux->iGPU + Radeon rail OFF + VBT inject
+    BOOLEAN DoSetOs = FALSE;   // I / L / A: load AppleSetOs (the iGPU becomes visible)
+    BOOLEAN DoSwitch = FALSE;  // I / L: mux->iGPU + Radeon rail OFF + VBT/DDI/ACPI patches
     BOOLEAN DoDump = FALSE;    // key L: write dump / log files
 
     if (AppleSetOsHandleCount == 0) {
@@ -621,12 +623,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     } else {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 2, TRUE, TRUE,
-            L"No key = plain boot (no AppleSetOs, no gmux). AppleSetOs only with I/L"
+            L"No key = plain boot (no AppleSetOs, no gmux). AppleSetOs only with I/L/A"
         );
     }
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 7, FALSE, TRUE,
-        L"I=iGPU,Radeon off L=same as I + log files"
+        L"I=iGPU,Radeon off L=I+log files A=AppleSetOs only"
     );
 
 
@@ -746,9 +748,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         }
     }
 
-    // I / L - see UI comments above
+    // I / L / A - see UI comments above
     if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
         // full switch to the iGPU, Radeon rail OFF, no log files
+        DoSetOs = TRUE;
         DoSwitch = TRUE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
@@ -757,11 +760,20 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
     if (Key.UnicodeChar == L'l' || Key.UnicodeChar == L'L') {
         // same as I, plus dump / log files
+        DoSetOs = TRUE;
         DoSwitch = TRUE;
         DoDump = TRUE;
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 7, TRUE, TRUE,
             L"L: mux->iGPU + Radeon OFF + inject t2gmux_vbt.bin + dump"
+        );
+    }
+    if (Key.UnicodeChar == L'a' || Key.UnicodeChar == L'A') {
+        // AppleSetOs only: nothing else is touched
+        DoSetOs = TRUE;
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 7, TRUE, TRUE,
+            L"A: AppleSetOs only (no gmux, no patches)"
         );
     }
 
@@ -786,8 +798,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         DoRegsDump(BS, ImageHandle, &gs, N4, L"before", 21);
     }
 
-    // load apple_set_os - only when I / L was pressed; no key = plain Windows boot
-    if (!DoSwitch) {
+    // load apple_set_os - only when I / L / A was pressed; no key = plain Windows boot
+    if (!DoSetOs) {
         AppleSetOsHandleCount = 0;
     }
     for(UINTN i = 0; i < AppleSetOsHandleCount; i++) {

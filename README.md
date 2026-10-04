@@ -9,8 +9,9 @@ UEFI loader (Boot Services, before Windows).
 | *(none)*, **Space** or any other key | no | no | no | plain Windows boot (immediately on a key, otherwise after 6 s): **no AppleSetOs**, no gmux |
 | **I** | yes | yes | **no** | full switch to the iGPU: mux + Radeon rail OFF + VBT injection + `DDI_A_4_LANES` + ACPI patch (if `\SSDT_IGPU.aml` exists) |
 | **L** | yes | yes | **yes** | same as I, plus OpRegion/VBT/register dumps before/after and `inject.txt` |
+| **A** | no | no | no | **AppleSetOs only**: no gmux, no VBT/`DDI_A_4_LANES`/ACPI patches, no files; then boots Windows |
 
-AppleSetOs is loaded only for I and L (the iGPU has to become visible for them). The plain boot skips it.
+AppleSetOs is loaded only for I, L and A (for I and L the iGPU has to become visible). The plain boot skips it.
 I writes nothing to the ESP; the result is only shown on screen.
 
 ## ACPI patch for brightness (I, L)
