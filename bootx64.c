@@ -7,6 +7,7 @@
 #include "include/pci_db.h"
 #include "include/int_vbt.h"
 #include "include/int_mem.h"
+#include "include/int_acpi.h"
 
 
 #define APPLE_SET_OS_VENDOR  "Apple Inc."
@@ -1038,10 +1039,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
 
     if (DoInject) {
-        const UINTN RCap = 4096;
+        const UINTN RCap = 8192;
         CHAR8 *RBuf = (CHAR8 *)_INT_AllocatePool(BS, RCap);
         EFI_STATUS IS = EFI_OUT_OF_RESOURCES;
         EFI_STATUS LS = EFI_OUT_OF_RESOURCES;
+        EFI_STATUS AS = EFI_OUT_OF_RESOURCES;
         if (RBuf != NULL) {
             _INT_Rep IR;
             _INT_RepInit(&IR, RBuf, RCap);
@@ -1049,6 +1051,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             // Same iGPU-side setup the firmware does when it boots from the iGPU
             // (see _INT_IgpuForceDdiA4Lanes); the mux alone does not provide it.
             LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
+            // ACPI patch (brightness via gmux): \SSDT_IGPU.aml from the ESP root, optional.
+            AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, L"\\SSDT_IGPU.aml", &IR);
             MakeName(N1, KeyTag, BootTag, L"inject.txt");
             _INT_WriteEspFile(BS, ImageHandle, N1, RBuf, IR.len);
             _INT_FreePool(BS, RBuf);
@@ -1060,6 +1064,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 20, TRUE, TRUE,
             L"DDI A 4 lanes: %s (%lX)", EFI_ERROR(LS) ? L"FAILED" : L"OK", LS
+        );
+        _INT_SimpleTextGraphicsPrint(
+            &gs, 0, 21, TRUE, TRUE,
+            L"ACPI patch SSDT_IGPU.aml: %s (%lX)",
+            AS == EFI_NOT_FOUND ? L"not found, skipped" : (EFI_ERROR(AS) ? L"FAILED" : L"OK"), AS
         );
     }
 

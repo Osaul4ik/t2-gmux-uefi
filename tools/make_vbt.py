@@ -30,6 +30,7 @@ BDB_GENERAL_DEFINITIONS = 2
 BDB_EDP = 27
 BDB_LFP_OPTIONS = 40
 BDB_LFP_DATA_PTRS = 41
+BDB_LFP_BACKLIGHT = 43
 
 RATES = {"rbr": 0, "hbr": 1, "hbr2": 2}
 LANES = {1: 0, 2: 1, 4: 3}
@@ -75,6 +76,9 @@ def main():
     ap.add_argument("--rate", choices=list(RATES), default="hbr2")
     ap.add_argument("--bpp", type=int, choices=[18, 24, 30], default=24)
     ap.add_argument("--keep-external", action="store_true", help="keep the template's DP-B/C/D children")
+    ap.add_argument("--backlight", choices=["none", "pwm"], default="none",
+                    help="none (default): tell Intel it has no backlight control - the T2 panel is dimmed by gmux (ACPI _BCM), "
+                         "not by an Intel PWM; pwm: keep the template's PWM data")
     ap.add_argument("--keep-fast-link", action="store_true", help="leave fast link training as in the template")
     ap.add_argument("-o", "--out", default="t2gmux_vbt.bin")
     a = ap.parse_args()
@@ -150,6 +154,18 @@ def main():
     struct.pack_into("<HH", t, fp, hact, vact)
     t[dv:dv + 18] = dtd
     print("panel timing: %dx%d, pixel clock %.2f MHz (from EDID DTD)" % (hact, vact, clock / 100))
+
+    # --- backlight (block 43): no Intel PWM, gmux owns the panel brightness ---
+    if a.backlight == "none" and BDB_LFP_BACKLIGHT in blocks:
+        o, sz = blocks[BDB_LFP_BACKLIGHT]
+        es = t[o]
+        for i in range(16):
+            t[o + 1 + i * es] &= ~0x03                    # data[i].type: PWM(2) -> NONE(0)
+            if o + 1 + 16 * es + 16 + i < o + sz:
+                t[o + 1 + 16 * es + 16 + i] = 0x00       # backlight_control[i]: type NONE, controller 0
+        print("backlight: type NONE (brightness is done by gmux / ACPI _BCM)")
+    else:
+        print("backlight: template PWM data kept")
 
     # --- checksum: whole VBT must sum to 0 ---
     t[26] = 0

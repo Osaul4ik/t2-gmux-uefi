@@ -25,6 +25,28 @@ I/U straight on a Radeon boot switches the mux under a live panel and the Intel
 driver has to bring the eDP link up from cold; that is what leaves the panel
 black with no backlight.
 
+## ACPI patch for brightness (I, U)
+
+If `\SSDT_IGPU.aml` exists in the ESP root, keys **I** and **U** also apply an ACPI patch before
+Windows starts (no file = skipped, nothing is touched):
+
+1. the only `_BCM` of the firmware table `SaSsdt` (`\_SB.PCI0.IGPU.DD1F._BCM`) is renamed to `XBCM`
+   in memory, the table checksum is fixed;
+2. the SSDT file is appended to a copy of the XSDT (EfiACPIReclaimMemory) and published through a
+   copy of the RSDP (`InstallConfigurationTable`); the old RSDP is updated in place when writable.
+
+The SSDT defines the new `DD1F._BCM`: it calls the original `XBCM` (Intel path) and Apple's own
+`GFX0.ABCM` (gmux port 0x74 = pct * 0xFFFF / 100). Checks: SSDT signature/length/checksum, exactly
+one `_BCM` in SaSsdt, memory writable; on any later failure the rename is reverted. The result is
+shown on screen (row 21) and written to `t2gmux_<key>_<boot>_inject.txt`.
+
+## Backlight in the VBT
+
+`tools/make_vbt.py` writes the VBT backlight block (BDB 43) as **type NONE** by default
+(`--backlight pwm` keeps the template's PWM data). The panel on the T2 MacBook is dimmed by gmux
+(port 0x74, driven through ACPI `_BCM`, see the SSDT patch above), not by an Intel PWM, so the
+Intel driver must not claim a PWM it cannot use.
+
 ## What the mux/rail keys do (I, U)
 
 Sequence follows Linux `apple-gmux` (T2 MMIO gmux):
