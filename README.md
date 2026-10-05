@@ -16,16 +16,18 @@ confirms), or press its letter to start it at once. If no key is pressed for 5 s
 | **D** | Only AMD Radeon | no | no | no | plain Windows boot: **no AppleSetOs**, no gmux, no injects, no files |
 | **A** | AMD Radeon + Intel HD | no | no | no | **AppleSetOs only**: no gmux, no VBT/`DDI_A_4_LANES`/ACPI patches, no files; then boots Windows |
 | **P** | AppleSetOs + ACPI patch | no | no | no | **AppleSetOs + ACPI patch only**: loads AppleSetOs, then applies `\\SSDT_IGPU.aml` (if present). No gmux, no rail, no VBT/`DDI_A_4_LANES`, no files |
+| **K** | ACPI patch + 4 lanes | no | no | no | AppleSetOs + ACPI patch (`\\SSDT_IGPU.aml`, with the role rename) + `DDI_A_4_LANES`; **no VBT injection**, no gmux, no rail, no files |
+| **J** | Mux Intel + 4 lanes | yes | no | no | AppleSetOs + mux panel->iGPU + `DDI_A_4_LANES`; **no VBT injection, no ACPI patch**, Radeon stays powered, no files |
 | **I** | Intel HD (auto after 5 s, selected at start) | yes | yes | no | AppleSetOs + full switch to the iGPU: mux + Radeon rail OFF + VBT injection + `DDI_A_4_LANES` + ACPI patch (if `\SSDT_IGPU.aml` exists) |
 | **U** | Intel HD, Radeon ON | yes | **no** | no | same as I, but the Radeon rail is **not** switched off: AppleSetOs + mux + VBT injection + `DDI_A_4_LANES` + ACPI patch |
 | **L** | Intel HD + Logs | yes | yes | yes | same as I, plus OpRegion/VBT/register dumps before/after and `inject.txt` |
 
-AppleSetOs is loaded for A, P, I, U and L (the iGPU has to become visible). D skips it.
+AppleSetOs is loaded for A, P, K, J, I, U and L (the iGPU has to become visible). D skips it.
 I writes nothing to the ESP; the result is only shown on screen.
 
-## ACPI patch for brightness (P, I, U, L)
+## ACPI patch for brightness (P, K, I, U, L)
 
-If `\SSDT_IGPU.aml` exists in the ESP root, keys **P**, **I**, **U** and **L** apply an ACPI patch before
+If `\SSDT_IGPU.aml` exists in the ESP root, keys **P**, **K**, **I**, **U** and **L** apply an ACPI patch before
 Windows starts (no file = skipped, nothing is touched):
 
 1. the only `_BCM` of the firmware table `SaSsdt` (`\_SB.PCI0.IGPU.DD1F._BCM`) is renamed to `XBCM`
@@ -38,7 +40,7 @@ The SSDT defines the new `DD1F._BCM`: it calls the original `XBCM` (Intel path) 
 one `_BCM` in SaSsdt, memory writable; on any later failure the rename is reverted. The result is
 shown on screen (row 21); with **L** it is also written to `t2gmux_L_<boot>_inject.txt`.
 
-## ACPI role rename (P, I, U, L; with `\SSDT_IGPU.aml`)
+## ACPI role rename (P, K, I, U, L; with `\SSDT_IGPU.aml`)
 
 Together with the ACPI patch the loader swaps the GPU roles in the ACPI namespace, in memory:
 
@@ -72,7 +74,7 @@ file, because the firmware does not publish them.
 (port 0x74, driven through ACPI `_BCM`, see the SSDT patch above), not by an Intel PWM, so the
 Intel driver must not claim a PWM it cannot use.
 
-## What the mux/rail keys do (I, U, L)
+## What the mux/rail keys do (J, I, U, L)
 
 Sequence follows Linux `apple-gmux` (T2 MMIO gmux):
 
