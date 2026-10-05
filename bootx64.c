@@ -487,8 +487,8 @@ typedef enum {
     MODE_RADEON_INTEL,          // A: AMD Radeon + Intel HD (AppleSetOs only)
     MODE_PATCH,                 // P: AppleSetOs + ACPI patch only (no mux, no rail, no VBT/DDI)
     MODE_PATCH_LANES,           // K: AppleSetOs + ACPI patch + DDI A 4 lanes (no VBT, no mux, no rail)
-    MODE_MUX_LANES,             // J: AppleSetOs + mux + Radeon OFF + DDI A 4 lanes (no VBT, no ACPI patch)
-    MODE_MUX_LANES_PATCH,       // H: like J, plus ACPI patch (no VBT)
+    MODE_MUX_LANES,             // J: like H, but the Radeon rail stays ON (mux + DDI A 4 lanes + ACPI patch, no VBT)
+    MODE_MUX_LANES_PATCH,       // H: AppleSetOs + mux + Radeon OFF + DDI A 4 lanes + ACPI patch (no VBT)
     MODE_INTEL,                 // I: Intel HD (AppleSetOs + mux + Radeon OFF + injects)
     MODE_INTEL_KEEP,            // U: Intel HD, Radeon stays ON (AppleSetOs + mux + injects)
     MODE_INTEL_LOG,             // L: Intel HD + logs
@@ -500,7 +500,7 @@ static CHAR16 *MenuText[MODE_COUNT] = {
     L"[A]  AMD Radeon + Intel HD  AppleSetOs only",
     L"[P]  AppleSetOs + patch     AppleSetOs + ACPI patch only",
     L"[K]  Patch + 4 lanes        AppleSetOs + ACPI patch + DDI A 4 lanes, no VBT",
-    L"[J]  Mux + 4 lanes          mux + Radeon OFF, no VBT, no ACPI",
+    L"[J]  Mux + patch, Radeon ON  mux + ACPI, Radeon ON, no VBT",
     L"[H]  Mux + 4 lanes + patch  mux + Radeon OFF + ACPI, no VBT",
     L"[I]  Intel HD               mux + Radeon OFF + injects",
     L"[U]  Intel HD, Radeon ON    mux + injects, Radeon stays on",
@@ -512,7 +512,7 @@ static CHAR16 *MenuName[MODE_COUNT] = {
     L"A - AMD Radeon + Intel HD",
     L"P - AppleSetOs + ACPI patch",
     L"K - ACPI patch + 4 lanes",
-    L"J - Mux Intel + 4 lanes",
+    L"J - Mux Intel + ACPI patch, Radeon ON",
     L"H - Mux Intel + 4 lanes + ACPI patch",
     L"I - Intel HD",
     L"U - Intel HD, Radeon ON",
@@ -805,13 +805,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     //   P = AppleSetOs + ACPI patch only: no gmux, no rail, no VBT/DDI, no files
     //   K = like P, plus DDI A 4 lanes (DDI_A_4_LANES): still no VBT, no gmux, no rail
     //   U = Intel HD, Radeon ON: same as I, but the Radeon rail is NOT switched off
-    //   J = Mux Intel + 4 lanes: AppleSetOs + mux->iGPU + Radeon rail OFF + DDI A 4 lanes; no VBT injection, no ACPI patch, no files
-    //   H = like J, plus the ACPI patch (SSDT_IGPU.aml + role rename); still no VBT injection
+    //   H = Mux Intel + 4 lanes + ACPI patch: AppleSetOs + mux->iGPU + Radeon rail OFF + DDI A 4 lanes + ACPI patch (SSDT_IGPU.aml + role rename); no VBT injection, no files
+    //   J = like H, but the Radeon rail is NOT switched off (Radeon stays powered); no VBT injection, no files
     BOOLEAN DoSetOs = FALSE;   // A / P / K / J / H / I / U / L: load AppleSetOs (the iGPU becomes visible)
     BOOLEAN DoSwitch = FALSE;  // J / H / I / U / L: mux->iGPU + DDI A 4 lanes (+ VBT / ACPI patch, see below)
-    BOOLEAN DoRailOff = FALSE; // J / H / I / L: additionally Radeon rail OFF (U keeps the Radeon powered)
+    BOOLEAN DoRailOff = FALSE; // H / I / L: additionally Radeon rail OFF (J and U keep the Radeon powered)
     BOOLEAN DoVbt = FALSE;     // I / U / L: VBT injection + EDID from the dGPU (J / H skip it)
-    BOOLEAN DoAcpi = FALSE;    // H / I / U / L: ACPI patch inside the switch block (J skips it)
+    BOOLEAN DoAcpi = FALSE;    // J / H / I / U / L: ACPI patch inside the switch block
     BOOLEAN DoPatchOnly = FALSE; // P / K: ACPI patch (SSDT_IGPU.aml), no mux/rail/VBT
     BOOLEAN DoLanes = FALSE;     // K: additionally set DDI A 4 lanes
     BOOLEAN DoDump = FALSE;    // L: write dump / log files
@@ -969,7 +969,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     case MODE_MUX_LANES:
         DoSetOs = TRUE;
         DoSwitch = TRUE;
-        DoRailOff = TRUE;                              // no DoVbt, no DoAcpi
+        DoAcpi = TRUE;                                 // no DoRailOff (Radeon stays powered), no DoVbt
         break;
     case MODE_MUX_LANES_PATCH:
         DoSetOs = TRUE;
@@ -1078,7 +1078,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     if (AppleSetOsHandleBuf != NULL)
         _INT_FreePool(BS, AppleSetOsHandleBuf);
 
-    // ---- J / H / I / U / L: gmux panel switch, (not U: dGPU rail OFF), (I / U / L: VBT inject) ----
+    // ---- J / H / I / U / L: gmux panel switch, (not J / U: dGPU rail OFF), (I / U / L: VBT inject) ----
     // Never power the dGPU rail back on from Windows after OFF (known hang on this HW).
     if (DoSwitch) {
         GMUX_IRQ_SAVE IrqSave;
@@ -1093,8 +1093,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         }
 
         if (!DoRailOff) {
-            // Mode U: panel on the iGPU, the Radeon stays powered (it is the render GPU).
-            LOG(&gs, PR_RAIL, L"Gmux: dGPU rail left ON (mode U)");
+            // Modes J / U: panel on the iGPU, the Radeon stays powered (it is the render GPU).
+            LOG(&gs, PR_RAIL, L"Gmux: dGPU rail left ON (mode J / U)");
         } else if (!MuxOk) {
             // Cutting the rail while the panel is still routed to the Radeon blacks the screen.
             LOG(&gs, PR_RAIL, L"Gmux: dGPU rail OFF SKIPPED (panel not confirmed on iGPU)");
@@ -1156,7 +1156,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             LOG(&gs, PR_ACPI, L"ACPI patch SSDT_IGPU.aml: %s (%lX)",
                 AS == EFI_NOT_FOUND ? L"not found, skipped" : (EFI_ERROR(AS) ? L"FAILED" : L"OK"), AS);
         } else {
-            LOG(&gs, PR_ACPI, L"ACPI patch: skipped (mode J)");
+            LOG(&gs, PR_ACPI, L"ACPI patch: skipped");
         }
     }
 
