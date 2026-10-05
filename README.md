@@ -10,28 +10,29 @@ How to build the ACPI patch (brightness, sleep, VBT): see [docs/ACPI_PATCH_GUIDE
 
 The screen is a small ASCII frame: title, status line, the mode menu, the auto-boot timer line and
 the list of graphics cards (refreshed every 3 s). Pick a mode with **Up / Down + Enter** (Space also
-confirms), or press its letter to start it at once. If no key is pressed for 5 s, the **default**
+confirms), or press its number (**1**-**4**) to start it at once. If no key is pressed for 5 s, the **default**
 mode starts automatically; any key stops the timer.
 
 The default mode is marked with an **x** in front of its row. Press **X** to save the highlighted
-mode as the default: the loader writes its letter to `\t2gmux_default.txt` in the ESP root (the
-status line confirms it). Without that file the default is **I**. Delete the file to go back to I.
+mode as the default: the loader writes its number to `\t2gmux_default.txt` in the ESP root (the
+status line confirms it). Without that file the default is **4**. Delete the file to go back to 4.
+Old default files with a letter (`D`, `A`, `H`, `I`) are still understood and map to 1, 2, 3, 4.
 X only saves, it does not boot.
 
 | Key | Mode | mux panel→iGPU | dGPU rail OFF | What it does |
 |-----|------|----------------|---------------|--------------|
-| **D** | Only AMD Radeon | no | no | plain Windows boot: **no AppleSetOs**, no gmux, no injects, no files |
-| **A** | AMD Radeon + Intel HD | no | no | **AppleSetOs only**: no gmux, no VBT / `DDI_A_4_LANES` / ACPI patches, no files; then boots Windows |
-| **H** | Mux Intel + 4 lanes + ACPI patch | yes | **yes** | AppleSetOs + mux panel->iGPU + Radeon rail OFF + `DDI_A_4_LANES` + ACPI patch (`\SSDT_IGPU.aml`); **no VBT injection from UEFI** (the VBT can come from the SSDT, see the guide), no files |
-| **I** | Intel HD (factory default) | yes | yes | AppleSetOs + full switch to the iGPU: mux + Radeon rail OFF + VBT injection (`\t2gmux_vbt.bin`) + EDID timing from the dGPU + `DDI_A_4_LANES` + ACPI patch |
+| **1** | Standard Boot | no | no | clean boot **without AppleSetOs**, gmux, injects or ACPI patches, no files |
+| **2** | Boot + Apple_set_os | no | no | standard boot + the **apple_set_os patch** (AppleSetOs only): no gmux, no VBT / `DDI_A_4_LANES` / ACPI patches, no files; then boots Windows |
+| **3** | Integrated gfx | yes | **yes** | AppleSetOs + mux panel->iGPU + Radeon rail OFF + `DDI_A_4_LANES` + ACPI patch (`\SSDT_IGPU.aml`); **no VBT injection from UEFI** (the VBT can come from the SSDT, see the guide), no files |
+| **4** | Integrated gfx + separate VBT (default) | yes | yes | everything from 3 + VBT injection from a separate file (`\t2gmux_vbt.bin`) + EDID timing from the dGPU |
 
-AppleSetOs is loaded for A, H and I (the iGPU has to become visible). D skips it.
+AppleSetOs is loaded for modes 2, 3 and 4 (the iGPU has to become visible). Mode 1 skips it.
 The loader writes nothing to the ESP except `t2gmux_default.txt` (key X); the result of each step is
 only shown on screen.
 
-## ACPI patch (H, I)
+## ACPI patch (modes 3, 4)
 
-If `\SSDT_IGPU.aml` exists in the ESP root, keys **H** and **I** apply an ACPI patch before
+If `\SSDT_IGPU.aml` exists in the ESP root, modes **3** and **4** apply an ACPI patch before
 Windows starts (no file = skipped, nothing is touched):
 
 1. the only `_BCM` of the firmware table `SaSsdt` (`\_SB.PCI0.IGPU.DD1F._BCM`) is renamed to `XBCM`
@@ -47,7 +48,7 @@ later failure the renames are reverted. The result is shown on screen. The GPU d
 What the SSDT contains (brightness, sleep, optional VBT) and how to rebuild it:
 [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md). The `.asl` source and the generator are in `tools/`.
 
-## Panel data from the dGPU (EDID substitution, mode I)
+## Panel data from the dGPU (EDID substitution, mode 4)
 
 Apple's EFI publishes panel data only for the Radeon (its GOP handle carries the EDID protocol);
 the iGPU has an empty VBT mailbox. After `t2gmux_vbt.bin` is injected, the loader looks for an
@@ -67,7 +68,7 @@ file, because the firmware does not publish them.
 (port 0x74, driven through ACPI `_BCM`, see the SSDT patch above), not by an Intel PWM, so the
 Intel driver must not claim a PWM it cannot use.
 
-## What the mux/rail keys do (H, I)
+## What the mux/rail modes do (3, 4)
 
 Sequence follows Linux `apple-gmux` (T2 MMIO gmux):
 
@@ -87,11 +88,11 @@ the panel link itself, hence the VBT injection below).
 
 ## WARNING
 
-- After dGPU rail OFF (**H** / **I**), do **not** power Radeon back on from Windows.
-- **H** does not inject a VBT from UEFI and cuts the Radeon rail: the iGPU only has a VBT if the firmware
+- After dGPU rail OFF (modes **3** / **4**), do **not** power Radeon back on from Windows.
+- Mode **3** does not inject a VBT from UEFI and cuts the Radeon rail: the iGPU only has a VBT if the firmware
   booted from it (Intel boot) **or** if the SSDT carries one (`make_ssdt_igpu.py --vbt`). On a Radeon
   boot without either, the OpRegion VBT mailbox is empty and the panel may stay dark.
-- Do not use an SSDT built with `--vbt` in mode **I**: AML runs after UEFI and would overwrite the
+- Do not use an SSDT built with `--vbt` in mode **4**: AML runs after UEFI and would overwrite the
   VBT (and the EDID timing taken from the dGPU) with the file's timing.
 
 ## Install / build
@@ -105,7 +106,7 @@ docker build -t apple_set_os_loader .
 docker run --rm -v "$(pwd):/build" apple_set_os_loader make clean all
 ```
 
-## VBT injection (mode I) - for "no eDP link training" on the iGPU
+## VBT injection (mode 4) - for "no eDP link training" on the iGPU
 
 Apple's T2 firmware leaves the Intel OpRegion VBT mailbox empty, so the Windows Intel driver does
 not know an eDP panel sits on DDI A.
@@ -115,11 +116,11 @@ not know an eDP panel sits on DDI A.
    -> `t2gmux_vbt.bin` (built from a real coreboot Whiskey Lake VBT, see
    `tools/template/`; only the eDP child on DDI A stays enabled).
 3. Copy `t2gmux_vbt.bin` to the ESP root.
-4. At the countdown press **I**. The loader copies the VBT into OpRegion+0x400 and re-reads it.
+4. At the countdown press **4**. The loader copies the VBT into OpRegion+0x400 and re-reads it.
 
-(For H the same VBT can be delivered through ACPI instead, see the guide.)
+(For mode 3 the same VBT can be delivered through ACPI instead, see the guide.)
 
-**H** and **I** also set `DDI_BUF_CTL(A).DDI_A_4_LANES` (bit 4, GTTMMADR+0x64000) in the iGPU. On
+Modes **3** and **4** also set `DDI_BUF_CTL(A).DDI_A_4_LANES` (bit 4, GTTMMADR+0x64000) in the iGPU. On
 gen < 11 i915 takes the DDI A lane limit from that bit, Apple's firmware sets it only when it lights
 the panel from the iGPU, and with the dGPU as boot GPU it stays clear - the t2linux patch
 "i915: 4 lane quirk for mbp15,1" works around exactly that. The write is skipped if BAR0 is

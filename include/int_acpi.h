@@ -5,7 +5,7 @@
 #include <efidef.h>
 #include "int_vbt.h"
 
-// ACPI patch for the Intel panel brightness (keys I / U).
+// ACPI patch for the Intel panel brightness (modes 3 / 4).
 //
 // Reads a compiled SSDT (default \SSDT_IGPU.aml in the ESP root) and:
 //   1. renames the single method "_BCM" of the firmware table "SaSsdt"
