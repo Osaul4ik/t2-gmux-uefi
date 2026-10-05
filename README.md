@@ -167,6 +167,11 @@ docker build -t apple_set_os_loader .
 docker run --rm -v "$(pwd):/build" apple_set_os_loader make clean all
 ```
 
+## Drivers: 
+Intel driver: https://www.intel.com/content/www/us/en/download/776137/intel-7th-10th-gen-processor-graphics-windows.html
+
+Intel control panel: http://www.microsoft.com/store/apps/9PLFNLNT3G5G
+
 ## Use
 
 - **Up / Down + Enter** (or Space) starts the highlighted mode. Pressing **1**-**4** starts that mode at once.
