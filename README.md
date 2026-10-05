@@ -97,7 +97,6 @@ Follow docs/ACPI_PATCH_GUIDE.md and docs/VBT_GUIDE.md from the project archive s
 Attached: panel EDID (edid_*.bin), DSDT and SSDT dumps (*.dat), the project archive.
 Give me the ready files: t2gmux_vbt.bin, SSDT_IGPU.aml (mode 4) and/or SSDT_IGPU_VBT.aml (mode 3).
 Show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
-After that copy vbt and aml to output
 ```
 
 Claude returns the files for the chosen mode. They are built from your dumps and were not run on
@@ -195,3 +194,25 @@ loader only writes one file, `t2gmux_default.txt`.
 - [docs/VBT_GUIDE.md](docs/VBT_GUIDE.md): how to make `t2gmux_vbt.bin`
 - [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md): how to make the SSDT files
 - [docs/TECHNICAL.md](docs/TECHNICAL.md): what the loader does internally (gmux switching, ACPI patch, EDID, lanes)
+
+## Credits
+
+Author: [Osaul4ik](https://github.com/Osaul4ik).
+
+This project was possible thanks to
+[aa15032261/apple_set_os-loader](https://github.com/aa15032261/apple_set_os-loader), a tiny EFI loader
+that sets up `apple_set_os` and chain-loads the original boot loader. It is the base this loader grew
+from. That project is in turn based on
+[0xbb/apple_set_os.efi](https://github.com/0xbb/apple_set_os.efi), which credits Andreas Heider for
+discovering the `apple_set_os` trick.
+
+## License
+
+Copyright (c) 2026 Osaul4ik. The code and documents of this project are released under the
+[MIT License](LICENSE).
+
+Third-party parts keep their own terms:
+
+- `tools/template/coreboot_google_sarien_data.vbt` is data from the coreboot project (GPL-2.0).
+- `pci_db/pci.ids` is the PCI ID database and comes under its own license (see the header of that file).
+- Code taken from the projects named in Credits stays under the terms of those projects.
