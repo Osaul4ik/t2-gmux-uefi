@@ -1,4 +1,4 @@
-name: Build bootx64.efi (apple_set_os + T2 gmux)
+name: Build bootx64.efi (GMUX_Control)
 
 on:
   push:

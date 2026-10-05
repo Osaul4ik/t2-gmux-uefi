@@ -1,23 +1,25 @@
-# apple_set_os loader + T2 gmux / dGPU
+# GMUX_Control v0.7
+
+T2 gmux / dGPU loader with AppleSetOs (formerly "apple_set_os loader").
 
 UEFI loader (Boot Services, before Windows).
 
 ## Boot mode menu
 
-At start a menu with four modes is shown. Pick one with **Up / Down + Enter** (Space also
-confirms), or press the letter to start that mode at once. If no key is pressed for 5 s, mode **I**
+The screen is a small ASCII frame: title, status line, the mode menu, the auto-boot timer line and
+the list of graphics cards (refreshed every 3 s). Pick a mode with **Up / Down + Enter** (Space also
+confirms), or press its letter to start it at once. If no key is pressed for 5 s, mode **I**
 (AppleSetOs + injects) starts automatically; any key stops the timer.
 
 | Key | Mode | mux panel→iGPU | dGPU rail OFF | Log files | What it does |
 |-----|------|----------------|---------------|-----------|--------------|
-| **D** | Default | no | no | no | plain Windows boot: **no AppleSetOs**, no gmux, no injects, no files |
-| **A** | AppleSetOs only | no | no | no | **AppleSetOs only**: no gmux, no VBT/`DDI_A_4_LANES`/ACPI patches, no files; then boots Windows |
-| **I** | iGPU, Radeon OFF (auto after 5 s, selected at start) | yes | yes | no | AppleSetOs + full switch to the iGPU: mux + Radeon rail OFF + VBT injection + `DDI_A_4_LANES` + ACPI patch (if `\SSDT_IGPU.aml` exists) |
-| **L** | iGPU, Radeon OFF + logs | yes | yes | yes | same as I, plus OpRegion/VBT/register dumps before/after and `inject.txt` |
+| **D** | Only AMD Radeon | no | no | no | plain Windows boot: **no AppleSetOs**, no gmux, no injects, no files |
+| **A** | AMD Radeon + Intel HD | no | no | no | **AppleSetOs only**: no gmux, no VBT/`DDI_A_4_LANES`/ACPI patches, no files; then boots Windows |
+| **I** | Intel HD (auto after 5 s, selected at start) | yes | yes | no | AppleSetOs + full switch to the iGPU: mux + Radeon rail OFF + VBT injection + `DDI_A_4_LANES` + ACPI patch (if `\SSDT_IGPU.aml` exists) |
+| **L** | Intel HD + Logs | yes | yes | yes | same as I, plus OpRegion/VBT/register dumps before/after and `inject.txt` |
 
 AppleSetOs is loaded only for A, I and L (for I and L the iGPU has to become visible). D skips it.
 I writes nothing to the ESP; the result is only shown on screen.
-The list of graphics cards under the menu is refreshed every 3 s.
 
 ## ACPI patch for brightness (I, L)
 
