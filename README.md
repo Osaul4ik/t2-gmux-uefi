@@ -11,6 +11,8 @@ If you find this project useful, consider buying me a coffee!
 
 [![Ko-fi](https://img.shields.io/badge/Support%20me%20on-Ko--fi-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/osaul4ik)
 
+## Attention
+MacBookPro16,4 (Radeon Pro 5600M) may require additional testing. Sleep/resume may have model-specific issues.
 
 
 ## What it does
