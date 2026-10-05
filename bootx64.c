@@ -422,6 +422,79 @@ DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruc
     _INT_FreePool(BS, Buf);
 }
 
+// ---- UI layout (text screen, rows) ----
+//  0  title
+//  1  AppleSetOs protocol status
+//  2  loader status / errors
+//  3  separator
+//  4..7  boot mode menu (MODE_COUNT rows)
+//  9  key hint
+// 10  countdown
+// 12  "Graphics cards:" header
+// 13+ graphics cards list
+// After a mode is chosen the screen below row 3 is cleared and used for progress output.
+#define MENU_ROW        4
+#define HINT_ROW        9
+#define TIMER_ROW       10
+#define GPU_HDR_ROW     12
+#define GPU_ROW         13
+#define COUNTDOWN_SECS  5
+#define TICKS_PER_SEC   20      // one tick = one 50 ms wait
+
+typedef enum {
+    MODE_DEFAULT = 0,           // D: plain boot
+    MODE_APPLESETOS,            // A: AppleSetOs only
+    MODE_IGPU,                  // I: AppleSetOs + mux + Radeon OFF + injects
+    MODE_IGPU_LOG,              // L: I + log files
+    MODE_COUNT
+} BOOT_MODE;
+
+static CHAR16 *MenuText[MODE_COUNT] = {
+    L"[D]  Default      plain boot: no AppleSetOs, no injects",
+    L"[A]  AppleSetOs   AppleSetOs only, nothing else",
+    L"[I]  iGPU         AppleSetOs + mux + Radeon OFF + injects",
+    L"[L]  iGPU + logs  same as I, plus log files on the ESP",
+};
+
+static CHAR16 *MenuName[MODE_COUNT] = {
+    L"D - Default",
+    L"A - AppleSetOs only",
+    L"I - iGPU, Radeon OFF",
+    L"L - iGPU, Radeon OFF + logs",
+};
+
+static VOID
+MenuDraw(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel)
+{
+    for (UINTN m = 0; m < MODE_COUNT; m++) {
+        _INT_SimpleTextGraphicsPrint(gs, 0, MENU_ROW + m, TRUE, FALSE,
+            L"  %s %s", (m == (UINTN)Sel) ? L">" : L" ", MenuText[m]);
+    }
+}
+
+// Full redraw, then the selected row is repainted inverted (black on light grey).
+static VOID
+MenuRefresh(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel)
+{
+    gs->ConOut->SetAttribute(gs->ConOut, 0x07);
+    _INT_SimpleTextGraphicsRefresh(gs);
+    if (gs->buf != NULL && (MENU_ROW + (UINTN)Sel) < gs->row) {
+        gs->ConOut->SetAttribute(gs->ConOut, 0x70);
+        gs->ConOut->SetCursorPosition(gs->ConOut, 0, MENU_ROW + (UINTN)Sel);
+        gs->ConOut->OutputString(gs->ConOut, gs->buf[MENU_ROW + (UINTN)Sel]);
+        gs->ConOut->SetAttribute(gs->ConOut, 0x07);
+        gs->ConOut->SetCursorPosition(gs->ConOut, 0, 0);
+    }
+}
+
+static VOID
+ClearRowsFrom(_INT_SimpleTextGraphicsStruct *gs, UINTN From)
+{
+    for (UINTN r = From; r < gs->row; r++) {
+        _INT_SimpleTextGraphicsPrint(gs, 0, r, TRUE, FALSE, L" ");
+    }
+}
+
 VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HANDLE ImageHandle)
 {
     EFI_STATUS Status;
@@ -442,12 +515,12 @@ VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HAND
 
     if (EFI_ERROR(Status)) {
         _INT_SimpleTextGraphicsPrint(
-            gs, 0, 10, FALSE, TRUE,
+            gs, 0, GPU_ROW, FALSE, TRUE,
             L"PciIo Buffer Error: %lX", Status
         );
     } else if (PciIoHandleCount == 0) {
         _INT_SimpleTextGraphicsPrint(
-            gs, 0, 10, FALSE, TRUE,
+            gs, 0, GPU_ROW, FALSE, TRUE,
             L"No PciIo Handles"
         );
     } else {
@@ -516,7 +589,7 @@ VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HAND
                         }
 
                         _INT_SimpleTextGraphicsPrint(
-                            gs, 0, 10 + NumOfGpu, TRUE, FALSE,
+                            gs, 0, GPU_ROW + NumOfGpu, TRUE, FALSE,
                             L"%04x %04x %s - %s", PciHeader.VendorId, PciHeader.DeviceId, VendorStr, DeviceStr
                         );
 
@@ -528,7 +601,7 @@ VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HAND
 
         for (int clearIdx = 0; clearIdx < 4; clearIdx++) {
             _INT_SimpleTextGraphicsPrint(
-                gs, 0, 10 + NumOfGpu + clearIdx, TRUE, FALSE,
+                gs, 0, GPU_ROW + NumOfGpu + clearIdx, TRUE, FALSE,
                 L" "
             );
         }
@@ -559,7 +632,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 0, FALSE, FALSE,
-        L"================== apple_set_os loader v0.5 =================="
+        L"================== apple_set_os loader v0.6 =================="
     );
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 1, FALSE, FALSE,
@@ -567,12 +640,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     );
 
     _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 9, FALSE, TRUE,
-        L"Connected Graphics Cards:"
+        &gs, 0, GPU_HDR_ROW, FALSE, TRUE,
+        L"Graphics cards:"
     );
     //update gpu info
     PrintGpu(BS, &gs, ImageHandle);
-
 
 
     // get apple_set_os protocol
@@ -596,7 +668,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     } else if (AppleSetOsHandleCount == 0) {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 1, TRUE, TRUE,
-            L"No SetOsProtocol Handles"
+            L"No SetOsProtocol Handles (AppleSetOs not available)"
         );
     } else {
         _INT_SimpleTextGraphicsPrint(
@@ -605,40 +677,23 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         );
     }
 
-    // Keys (after countdown):
-    //   I = full switch to the iGPU: mux + Radeon rail OFF + inject t2gmux_vbt.bin + DDI A 4 lanes (no log files)
-    //   L = same as I, but also writes the OpRegion/VBT/register dump files (before/after/inject)
+    // Boot modes (chosen in the menu below):
+    //   D = default: plain boot - no AppleSetOs, no mux, no rail, no injects, no files
     //   A = AppleSetOs only: no gmux, no rail, no VBT/DDI/ACPI patches, no log files
-    //   Space (or any other key) = skip the countdown, plain boot
-    // Default (no key, or any other key): plain boot - no AppleSetOs, no mux, no rail
-    BOOLEAN DoSetOs = FALSE;   // I / L / A: load AppleSetOs (the iGPU becomes visible)
+    //   I = full switch to the iGPU: AppleSetOs + mux + Radeon rail OFF + inject t2gmux_vbt.bin + DDI A 4 lanes + ACPI patch
+    //   L = same as I, but also writes the OpRegion/VBT/register dump files (before/after/inject)
+    BOOLEAN DoSetOs = FALSE;   // A / I / L: load AppleSetOs (the iGPU becomes visible)
     BOOLEAN DoSwitch = FALSE;  // I / L: mux->iGPU + Radeon rail OFF + VBT/DDI/ACPI patches
-    BOOLEAN DoDump = FALSE;    // key L: write dump / log files
-
-    if (AppleSetOsHandleCount == 0) {
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 2, TRUE, TRUE,
-            L"AppleSetOs not available."
-        );
-    } else {
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 2, TRUE, TRUE,
-            L"No key = plain boot (no AppleSetOs, no gmux). AppleSetOs only with I/L/A"
-        );
-    }
-    _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 7, FALSE, TRUE,
-        L"I=iGPU,Radeon off L=I+log files A=AppleSetOs only"
-    );
+    BOOLEAN DoDump = FALSE;    // L: write dump / log files
 
 
     // find and load bootx64_original.efi
     EFI_LOADED_IMAGE_PROTOCOL* LoadedImage;
-	EFI_DEVICE_PATH* DevicePath = NULL;
-	EFI_HANDLE DriverHandle;
+    EFI_DEVICE_PATH* DevicePath = NULL;
+    EFI_HANDLE DriverHandle;
 
     _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, FALSE, TRUE,
+        &gs, 0, 2, FALSE, TRUE,
         L"Initializing LoadedImageProtocol..."
     );
     EFI_GUID efi_loaded_image_protocol_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
@@ -648,7 +703,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
 
     _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, TRUE, TRUE,
+        &gs, 0, 2, TRUE, TRUE,
         L"Locating bootx64_original.efi..."
     );
     DevicePath = _INT_FileDevicePath(
@@ -659,123 +714,170 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     if (DevicePath == NULL) {
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 3, TRUE, TRUE,
+            &gs, 0, 2, TRUE, TRUE,
             L"Unable to find bootx64_original.efi"
         );
         goto halt;
-	}
+    }
 
     _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, TRUE, TRUE,
-            L"Loading bootx64_original.efi to memory..."
+        &gs, 0, 2, TRUE, TRUE,
+        L"Loading bootx64_original.efi to memory..."
     );
     // Attempt to load the driver.
-	Status = BS->LoadImage(FALSE, ImageHandle, DevicePath, NULL, 0, &DriverHandle);
+    Status = BS->LoadImage(FALSE, ImageHandle, DevicePath, NULL, 0, &DriverHandle);
     _INT_FreePool(BS, DevicePath);
     DevicePath = NULL;
 
-	if (EFI_ERROR(Status)) {
+    if (EFI_ERROR(Status)) {
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 3, TRUE, TRUE,
+            &gs, 0, 2, TRUE, TRUE,
             L"Unable to load bootx64_original.efi to memory"
         );
-		goto halt;
-	}
+        goto halt;
+    }
 
     _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, TRUE, TRUE,
+        &gs, 0, 2, TRUE, TRUE,
         L"Prepare to run bootx64_original.efi..."
     );
 
-	Status = BS->OpenProtocol(
+    Status = BS->OpenProtocol(
         DriverHandle, 
         &efi_loaded_image_protocol_guid,
-		(VOID**)&LoadedImage, 
+        (VOID**)&LoadedImage, 
         ImageHandle, 
         NULL, 
         EFI_OPEN_PROTOCOL_GET_PROTOCOL
     );
-	if (EFI_ERROR(Status)) {
+    if (EFI_ERROR(Status)) {
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 3, TRUE, TRUE,
+            &gs, 0, 2, TRUE, TRUE,
             L"Failed to run bootx64_original.efi"
         );
-		goto halt;
-	}
+        goto halt;
+    }
 
     _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, TRUE, TRUE,
-        L" "
+        &gs, 0, 2, TRUE, TRUE,
+        L"bootx64_original.efi ready"
     );
 
+    // ---- boot mode menu ----
+    // Up/Down = move, Enter/Space = confirm, D/A/I/L = pick and confirm at once.
+    // Any key stops the auto-boot timer; if no key is pressed for COUNTDOWN_SECS
+    // the mode I (AppleSetOs + mux + Radeon OFF + injects) is started.
     _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 4, FALSE, TRUE,
-        L"----------------------- Ready to boot ------------------------"
+        &gs, 0, 3, TRUE, FALSE,
+        L"------------------------- Boot mode --------------------------"
     );
     _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 5, FALSE, TRUE,
-        L"Plug in your eGPU then press any key."
+        &gs, 0, HINT_ROW, TRUE, FALSE,
+        L"Up/Down + Enter to select, or press D / A / I / L"
     );
-    
 
+    BOOT_MODE Sel = MODE_IGPU;      // no key within COUNTDOWN_SECS -> I (AppleSetOs + injects)
+    BOOLEAN TimerOn = TRUE;
+    BOOLEAN Chosen = FALSE;
+    UINT32 Tick = 0;
 
-    EFI_INPUT_KEY Key;
-    Key.UnicodeChar = 0;
-    Key.ScanCode = 0;
+    MenuDraw(&gs, Sel);
+    _INT_SimpleTextGraphicsPrint(
+        &gs, 0, TIMER_ROW, TRUE, FALSE,
+        L"Auto-boot [I] in %u second(s) - any key stops the timer", (UINT32)COUNTDOWN_SECS
+    );
+    PrintGpu(BS, &gs, ImageHandle);
+    MenuRefresh(&gs, Sel);
 
-    for (UINT8 i = 6; i > 0; i--) {
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 6, TRUE, TRUE,
-            L"Booting bootx64_original.efi in %u second(s)", (UINT32)i
-        );
+    while (!Chosen) {
+        EFI_INPUT_KEY Key;
+        BOOLEAN Dirty = FALSE;
+        EFI_STATUS WS;
 
-        UINT16 MaxCycle = 20;
+        Key.UnicodeChar = 0;
+        Key.ScanCode = 0;
 
-        if (i % 3 == 1) {
-            MaxCycle = 18;
-            PrintGpu(BS, &gs, ImageHandle);
+        // one tick = one 50 ms wait for a key
+        WS = _INT_WaitForSingleEvent(BS, ConIn->WaitForKey, 500000);
+        if (WS == EFI_TIMEOUT || EFI_ERROR(WS)) {
+            if (EFI_ERROR(WS) && WS != EFI_TIMEOUT)
+                BS->Stall(50000);   // event not usable: still pace the loop
+            Tick++;
         }
 
-        // refresh screen when idle
-        for (UINT16 j = 0; j < MaxCycle; j++) {
-            // each cycle is about 50ms 
-            _INT_WaitForSingleEvent(BS, ConIn->WaitForKey, 450000);
-            if (!EFI_ERROR(ConIn->ReadKeyStroke(ConIn, &Key))) {
-                // break loop
-                i = 1; j = 20;
+        if (!EFI_ERROR(ConIn->ReadKeyStroke(ConIn, &Key))) {
+            CHAR16 c = Key.UnicodeChar;
+
+            if (Key.ScanCode == 0x01) {            // Up
+                Sel = (BOOT_MODE)((Sel + MODE_COUNT - 1) % MODE_COUNT);
+                TimerOn = FALSE;
+            } else if (Key.ScanCode == 0x02) {     // Down
+                Sel = (BOOT_MODE)((Sel + 1) % MODE_COUNT);
+                TimerOn = FALSE;
+            } else if (c == 0x0D || c == 0x0A || c == L' ') {   // Enter / Space
+                Chosen = TRUE;
+            } else if (c == L'd' || c == L'D') {
+                Sel = MODE_DEFAULT; Chosen = TRUE;
+            } else if (c == L'a' || c == L'A') {
+                Sel = MODE_APPLESETOS; Chosen = TRUE;
+            } else if (c == L'i' || c == L'I') {
+                Sel = MODE_IGPU; Chosen = TRUE;
+            } else if (c == L'l' || c == L'L') {
+                Sel = MODE_IGPU_LOG; Chosen = TRUE;
+            } else {
+                TimerOn = FALSE;                   // any other key just stops the timer
             }
-            _INT_SimpleTextGraphicsRefresh(&gs);
+            Dirty = TRUE;
+        }
+
+        if (!Chosen) {
+            if (TimerOn && Tick >= (UINT32)(COUNTDOWN_SECS * TICKS_PER_SEC)) {
+                Chosen = TRUE;                     // timeout: start the highlighted mode
+            } else if (Dirty || (Tick % TICKS_PER_SEC) == 0) {
+                // redraw on change and once per second
+                MenuDraw(&gs, Sel);
+                if (TimerOn) {
+                    _INT_SimpleTextGraphicsPrint(
+                        &gs, 0, TIMER_ROW, TRUE, FALSE,
+                        L"Auto-boot [I] in %u second(s) - any key stops the timer",
+                        (UINT32)(COUNTDOWN_SECS - Tick / TICKS_PER_SEC)
+                    );
+                } else {
+                    _INT_SimpleTextGraphicsPrint(
+                        &gs, 0, TIMER_ROW, TRUE, FALSE,
+                        L"Timer stopped - choose a mode and press Enter"
+                    );
+                }
+                if ((Tick % (3 * TICKS_PER_SEC)) == 0 && !Dirty)
+                    PrintGpu(BS, &gs, ImageHandle);   // pick up a newly plugged GPU
+                MenuRefresh(&gs, Sel);
+            }
         }
     }
 
-    // I / L / A - see UI comments above
-    if (Key.UnicodeChar == L'i' || Key.UnicodeChar == L'I') {
-        // full switch to the iGPU, Radeon rail OFF, no log files
+    switch (Sel) {
+    case MODE_APPLESETOS:
+        DoSetOs = TRUE;
+        break;
+    case MODE_IGPU:
         DoSetOs = TRUE;
         DoSwitch = TRUE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"I: mux->iGPU + Radeon OFF + inject t2gmux_vbt.bin"
-        );
-    }
-    if (Key.UnicodeChar == L'l' || Key.UnicodeChar == L'L') {
-        // same as I, plus dump / log files
+        break;
+    case MODE_IGPU_LOG:
         DoSetOs = TRUE;
         DoSwitch = TRUE;
         DoDump = TRUE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"L: mux->iGPU + Radeon OFF + inject t2gmux_vbt.bin + dump"
-        );
+        break;
+    default:
+        break;                                     // MODE_DEFAULT: nothing is touched
     }
-    if (Key.UnicodeChar == L'a' || Key.UnicodeChar == L'A') {
-        // AppleSetOs only: nothing else is touched
-        DoSetOs = TRUE;
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
-            L"A: AppleSetOs only (no gmux, no patches)"
-        );
-    }
+
+    // The menu is done: everything below row 3 is used for progress output.
+    ClearRowsFrom(&gs, 3);
+    _INT_SimpleTextGraphicsPrint(
+        &gs, 0, 3, TRUE, TRUE,
+        L"Mode: %s", MenuName[Sel]
+    );
 
     // File name tag: which GPU the firmware booted from (see MakeName).
     const CHAR16 *BootTag = L"rad";
@@ -784,10 +886,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         if (_INT_IgpuVisible(BS, ImageHandle))
             BootTag = L"igpu";
         MakeName(N1, BootTag, L"*");
-        _INT_SimpleTextGraphicsPrint(&gs, 0, 23, TRUE, TRUE, L"files: %s", N1);
+        _INT_SimpleTextGraphicsPrint(&gs, 0, 21, TRUE, TRUE, L"files: %s", N1);
     }
 
-    // Must come after the key that sets DoDump (L), otherwise L
+    // Must come after the mode is known (L), otherwise L
     // never writes the "before" report.
     if (DoDump) {
         MakeName(N1, BootTag, L"before.txt");
@@ -795,10 +897,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         MakeName(N3, BootTag, L"before_vbt.bin");
         DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"before", 11);
         MakeName(N4, BootTag, L"regs_before.txt");
-        DoRegsDump(BS, ImageHandle, &gs, N4, L"before", 21);
+        DoRegsDump(BS, ImageHandle, &gs, N4, L"before", 15);
     }
 
-    // load apple_set_os - only when I / L / A was pressed; no key = plain Windows boot
+    // load apple_set_os - only for A / I / L; D = plain Windows boot
     if (!DoSetOs) {
         AppleSetOsHandleCount = 0;
     }
@@ -857,18 +959,18 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         GmuxIrqBegin(BS, &IrqSave);
 
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 7, TRUE, TRUE,
+            &gs, 0, 4, TRUE, TRUE,
             L"Gmux: panel -> iGPU..."
         );
         BOOLEAN MuxOk = GmuxSwitchToIGD(BS);
         if (MuxOk) {
             _INT_SimpleTextGraphicsPrint(
-                &gs, 0, 7, TRUE, TRUE,
+                &gs, 0, 4, TRUE, TRUE,
                 L"Gmux: route OK, readback=iGPU"
             );
         } else {
             _INT_SimpleTextGraphicsPrint(
-                &gs, 0, 7, TRUE, TRUE,
+                &gs, 0, 4, TRUE, TRUE,
                 L"Gmux: route FAILED (no gmux or readback != iGPU)"
             );
         }
@@ -876,24 +978,24 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         if (!MuxOk) {
             // Cutting the rail while the panel is still routed to the Radeon blacks the screen.
             _INT_SimpleTextGraphicsPrint(
-                &gs, 0, 8, TRUE, TRUE,
+                &gs, 0, 5, TRUE, TRUE,
                 L"Gmux: dGPU rail OFF SKIPPED (panel not confirmed on iGPU)"
             );
         } else {
             BOOLEAN PowerEvent = FALSE;
             _INT_SimpleTextGraphicsPrint(
-                &gs, 0, 8, TRUE, TRUE,
+                &gs, 0, 5, TRUE, TRUE,
                 L"Gmux: powering OFF dGPU rail (0x50)..."
             );
             if (GmuxSetDiscretePower(BS, FALSE, &PowerEvent)) {
                 _INT_SimpleTextGraphicsPrint(
-                    &gs, 0, 8, TRUE, TRUE,
+                    &gs, 0, 5, TRUE, TRUE,
                     L"Gmux: dGPU rail OFF OK (power event %s)",
                     PowerEvent ? L"seen" : L"not seen, fixed delay"
                 );
             } else {
                 _INT_SimpleTextGraphicsPrint(
-                    &gs, 0, 8, TRUE, TRUE,
+                    &gs, 0, 5, TRUE, TRUE,
                     L"Gmux: dGPU rail OFF FAILED"
                 );
             }
@@ -901,7 +1003,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
         UINT8 Left = GmuxIrqEnd(BS, &IrqSave);
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 9, TRUE, TRUE,
+            &gs, 0, 6, TRUE, TRUE,
             L"Gmux: irq status cleared (was %x), mask restored=%s",
             (UINTN)Left, IrqSave.MaskValid ? L"yes" : L"no"
         );
@@ -932,15 +1034,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             _INT_FreePool(BS, RBuf);
         }
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 19, TRUE, TRUE,
+            &gs, 0, 7, TRUE, TRUE,
             L"VBT inject: %s (%lX)", EFI_ERROR(IS) ? L"FAILED" : L"OK", IS
         );
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 20, TRUE, TRUE,
+            &gs, 0, 8, TRUE, TRUE,
             L"DDI A 4 lanes: %s (%lX)", EFI_ERROR(LS) ? L"FAILED" : L"OK", LS
         );
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 21, TRUE, TRUE,
+            &gs, 0, 9, TRUE, TRUE,
             L"ACPI patch SSDT_IGPU.aml: %s (%lX)",
             AS == EFI_NOT_FOUND ? L"not found, skipped" : (EFI_ERROR(AS) ? L"FAILED" : L"OK"), AS
         );
@@ -950,16 +1052,16 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         MakeName(N1, BootTag, L"after.txt");
         MakeName(N2, BootTag, L"after_opregion.bin");
         MakeName(N3, BootTag, L"after_vbt.bin");
-        DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"after", 15);
+        DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"after", 16);
         MakeName(N4, BootTag, L"regs_after.txt");
-        DoRegsDump(BS, ImageHandle, &gs, N4, L"after", 22);
+        DoRegsDump(BS, ImageHandle, &gs, N4, L"after", 20);
         for (UINT16 j = 0; j < 800; j++) {
             BS->Stall(10000);   // ~8 s to read the summary
         }
     }
 
     _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 6, TRUE, TRUE,
+        &gs, 0, 10, TRUE, TRUE,
         L"Booting bootx64_original.efi..."
     );
 
@@ -976,7 +1078,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     if (EFI_ERROR(Status)) {
         _INT_SetGraphicsMode(BS, FALSE);
         _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 6, TRUE, TRUE,
+            &gs, 0, 10, TRUE, TRUE,
             L"Unable to boot bootx64_original.efi"
         );
         goto halt;

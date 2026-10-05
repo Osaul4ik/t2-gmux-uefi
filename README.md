@@ -2,17 +2,22 @@
 
 UEFI loader (Boot Services, before Windows).
 
-## Keys during countdown
+## Boot mode menu
 
-| Key | mux panel→iGPU | dGPU rail OFF | Log files | Other |
-|-----|----------------|---------------|-----------|-------|
-| *(none)*, **Space** or any other key | no | no | no | plain Windows boot (immediately on a key, otherwise after 6 s): **no AppleSetOs**, no gmux |
-| **I** | yes | yes | **no** | full switch to the iGPU: mux + Radeon rail OFF + VBT injection + `DDI_A_4_LANES` + ACPI patch (if `\SSDT_IGPU.aml` exists) |
-| **L** | yes | yes | **yes** | same as I, plus OpRegion/VBT/register dumps before/after and `inject.txt` |
-| **A** | no | no | no | **AppleSetOs only**: no gmux, no VBT/`DDI_A_4_LANES`/ACPI patches, no files; then boots Windows |
+At start a menu with four modes is shown. Pick one with **Up / Down + Enter** (Space also
+confirms), or press the letter to start that mode at once. If no key is pressed for 5 s, mode **I**
+(AppleSetOs + injects) starts automatically; any key stops the timer.
 
-AppleSetOs is loaded only for I, L and A (for I and L the iGPU has to become visible). The plain boot skips it.
+| Key | Mode | mux panel→iGPU | dGPU rail OFF | Log files | What it does |
+|-----|------|----------------|---------------|-----------|--------------|
+| **D** | Default | no | no | no | plain Windows boot: **no AppleSetOs**, no gmux, no injects, no files |
+| **A** | AppleSetOs only | no | no | no | **AppleSetOs only**: no gmux, no VBT/`DDI_A_4_LANES`/ACPI patches, no files; then boots Windows |
+| **I** | iGPU, Radeon OFF (auto after 5 s, selected at start) | yes | yes | no | AppleSetOs + full switch to the iGPU: mux + Radeon rail OFF + VBT injection + `DDI_A_4_LANES` + ACPI patch (if `\SSDT_IGPU.aml` exists) |
+| **L** | iGPU, Radeon OFF + logs | yes | yes | yes | same as I, plus OpRegion/VBT/register dumps before/after and `inject.txt` |
+
+AppleSetOs is loaded only for A, I and L (for I and L the iGPU has to become visible). D skips it.
 I writes nothing to the ESP; the result is only shown on screen.
+The list of graphics cards under the menu is refreshed every 3 s.
 
 ## ACPI patch for brightness (I, L)
 
