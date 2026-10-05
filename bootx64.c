@@ -444,7 +444,7 @@ DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruc
 //
 // After a mode is chosen the frame below the title is cleared and the rows PR_* are
 // used for progress output (no frame there).
-#define APP_TITLE       L"GMUX_Control v0.7"
+#define APP_TITLE       L"GMUX_Control v0.8"
 #define UI_W            72      // frame width in columns, including both border chars
 
 #define ROW_TOP         0
@@ -485,39 +485,66 @@ DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruc
 typedef enum {
     MODE_RADEON = 0,            // D: only AMD Radeon (plain boot)
     MODE_RADEON_INTEL,          // A: AMD Radeon + Intel HD (AppleSetOs only)
-    MODE_PATCH,                 // P: AppleSetOs + ACPI patch only (no mux, no rail, no VBT/DDI)
-    MODE_PATCH_LANES,           // K: AppleSetOs + ACPI patch + DDI A 4 lanes (no VBT, no mux, no rail)
-    MODE_MUX_LANES,             // J: like H, but the Radeon rail stays ON (mux + DDI A 4 lanes + ACPI patch, no VBT)
     MODE_MUX_LANES_PATCH,       // H: AppleSetOs + mux + Radeon OFF + DDI A 4 lanes + ACPI patch (no VBT)
     MODE_INTEL,                 // I: Intel HD (AppleSetOs + mux + Radeon OFF + injects)
-    MODE_INTEL_KEEP,            // U: Intel HD, Radeon stays ON (AppleSetOs + mux + injects)
-    MODE_INTEL_LOG,             // L: Intel HD + logs
     MODE_COUNT
 } BOOT_MODE;
 
 static CHAR16 *MenuText[MODE_COUNT] = {
     L"[D]  Only AMD Radeon        plain boot, nothing is touched",
     L"[A]  AMD Radeon + Intel HD  AppleSetOs only",
-    L"[P]  AppleSetOs + patch     AppleSetOs + ACPI patch only",
-    L"[K]  Patch + 4 lanes        AppleSetOs + ACPI patch + DDI A 4 lanes, no VBT",
-    L"[J]  Mux + patch, Radeon ON  mux + ACPI, Radeon ON, no VBT",
     L"[H]  Mux + 4 lanes + patch  mux + Radeon OFF + ACPI, no VBT",
     L"[I]  Intel HD               mux + Radeon OFF + injects",
-    L"[U]  Intel HD, Radeon ON    mux + injects, Radeon stays on",
-    L"[L]  Intel HD + Logs        same as I + log files on the ESP",
 };
 
 static CHAR16 *MenuName[MODE_COUNT] = {
     L"D - Only AMD Radeon",
     L"A - AMD Radeon + Intel HD",
-    L"P - AppleSetOs + ACPI patch",
-    L"K - ACPI patch + 4 lanes",
-    L"J - Mux Intel + ACPI patch, Radeon ON",
     L"H - Mux Intel + 4 lanes + ACPI patch",
     L"I - Intel HD",
-    L"U - Intel HD, Radeon ON",
-    L"L - Intel HD + Logs",
 };
+
+// Default mode (the one with the x mark, started by the auto-boot timer) is kept in a
+// one-letter file in the root of the ESP; key X in the menu rewrites it.
+#define DEFAULT_FILE    L"\\t2gmux_default.txt"
+static const CHAR16 ModeLetter[MODE_COUNT] = { L'D', L'A', L'H', L'I' };
+
+static BOOT_MODE
+DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image)
+{
+    VOID *Data = NULL;
+    UINTN Size = 0;
+    BOOT_MODE Def = MODE_INTEL;                    // no file / unreadable: I, as before
+
+    if (!EFI_ERROR(_INT_ReadEspFile(BS, Image, DEFAULT_FILE, &Data, &Size)) && Data != NULL) {
+        for (UINTN i = 0; i < Size; i++) {
+            CHAR8 ch = ((CHAR8 *)Data)[i];
+            if (ch >= 'a' && ch <= 'z')
+                ch = (CHAR8)(ch - 'a' + 'A');
+            UINTN m;
+            for (m = 0; m < MODE_COUNT; m++) {
+                if ((CHAR8)ModeLetter[m] == ch) {
+                    Def = (BOOT_MODE)m;
+                    break;
+                }
+            }
+            if (m < MODE_COUNT || (ch != ' ' && ch != '\r' && ch != '\n'))
+                break;                             // first non-blank character decides
+        }
+        _INT_FreePool(BS, Data);
+    }
+    return Def;
+}
+
+static EFI_STATUS
+DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode)
+{
+    CHAR8 Buf[2];
+
+    Buf[0] = (CHAR8)ModeLetter[Mode];
+    Buf[1] = '\n';
+    return _INT_WriteEspFile(BS, Image, DEFAULT_FILE, Buf, 2);
+}
 
 // Row = Edge + (UI_W-2) x Fill + Edge, rest of the line blank. Edits the text buffer only.
 static VOID
@@ -601,15 +628,16 @@ UiDrawFrame(_INT_SimpleTextGraphicsStruct *gs)
     UiBorder(gs, ROW_TITLE);
 
     UI_PRINT(gs, ROW_MENU_HDR, L"Boot mode:");
-    UI_PRINT(gs, HINT_ROW, L"Up/Down + Enter to select, or press the mode letter");
+    UI_PRINT(gs, HINT_ROW, L"Up/Down + Enter, or the mode letter. X = save selected as default (x)");
     UI_PRINT(gs, GPU_HDR_ROW, L"Graphics cards:");
 }
 
 static VOID
-MenuDraw(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel)
+MenuDraw(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel, BOOT_MODE Def)
 {
     for (UINTN m = 0; m < MODE_COUNT; m++) {
-        UI_PRINT(gs, MENU_ROW + m, L"%s %s", (m == (UINTN)Sel) ? L">" : L" ", MenuText[m]);
+        UI_PRINT(gs, MENU_ROW + m, L"%s%s %s", (m == (UINTN)Sel) ? L">" : L" ",
+                 (m == (UINTN)Def) ? L"x" : L" ", MenuText[m]);
     }
 }
 
@@ -800,21 +828,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     // Boot modes (chosen in the menu):
     //   D = Only AMD Radeon: plain boot - no AppleSetOs, no mux, no rail, no injects, no files
     //   A = AMD Radeon + Intel HD: AppleSetOs only - no gmux, no rail, no VBT/DDI/ACPI patches, no files
+    //   H = Mux Intel + 4 lanes + ACPI patch: AppleSetOs + mux->iGPU + Radeon rail OFF + DDI A 4 lanes + ACPI patch
+    //       (SSDT_IGPU.aml); no VBT injection from UEFI (the VBT can come from the SSDT), no files
     //   I = Intel HD: AppleSetOs + mux->iGPU + Radeon rail OFF + inject t2gmux_vbt.bin + DDI A 4 lanes + ACPI patch
-    //   L = Intel HD + Logs: same as I, plus the OpRegion/VBT/register dump files (before/after/inject)
-    //   P = AppleSetOs + ACPI patch only: no gmux, no rail, no VBT/DDI, no files
-    //   K = like P, plus DDI A 4 lanes (DDI_A_4_LANES): still no VBT, no gmux, no rail
-    //   U = Intel HD, Radeon ON: same as I, but the Radeon rail is NOT switched off
-    //   H = Mux Intel + 4 lanes + ACPI patch: AppleSetOs + mux->iGPU + Radeon rail OFF + DDI A 4 lanes + ACPI patch (SSDT_IGPU.aml); no VBT injection, no files
-    //   J = like H, but the Radeon rail is NOT switched off (Radeon stays powered); no VBT injection, no files
-    BOOLEAN DoSetOs = FALSE;   // A / P / K / J / H / I / U / L: load AppleSetOs (the iGPU becomes visible)
-    BOOLEAN DoSwitch = FALSE;  // J / H / I / U / L: mux->iGPU + DDI A 4 lanes (+ VBT / ACPI patch, see below)
-    BOOLEAN DoRailOff = FALSE; // H / I / L: additionally Radeon rail OFF (J and U keep the Radeon powered)
-    BOOLEAN DoVbt = FALSE;     // I / U / L: VBT injection + EDID from the dGPU (J / H skip it)
-    BOOLEAN DoAcpi = FALSE;    // J / H / I / U / L: ACPI patch inside the switch block
-    BOOLEAN DoPatchOnly = FALSE; // P / K: ACPI patch (SSDT_IGPU.aml), no mux/rail/VBT
-    BOOLEAN DoLanes = FALSE;     // K: additionally set DDI A 4 lanes
-    BOOLEAN DoDump = FALSE;    // L: write dump / log files
+    BOOLEAN DoSetOs = FALSE;   // A / H / I: load AppleSetOs (the iGPU becomes visible)
+    BOOLEAN DoSwitch = FALSE;  // H / I: mux->iGPU + DDI A 4 lanes (+ VBT / ACPI patch, see below)
+    BOOLEAN DoRailOff = FALSE; // H / I: additionally Radeon rail OFF
+    BOOLEAN DoVbt = FALSE;     // I: VBT injection + EDID from the dGPU (H skips it)
+    BOOLEAN DoAcpi = FALSE;    // H / I: ACPI patch inside the switch block
+    BOOLEAN DoDump = FALSE;    // dump / log files (no menu mode sets it any more)
 
 
     // find and load bootx64_original.efi
@@ -871,10 +893,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     UI_STATUS(&gs, L"bootx64_original.efi ready");
 
     // ---- boot mode menu ----
-    // Up/Down = move, Enter/Space = confirm, D/A/P/K/J/H/I/U/L = pick and confirm at once.
-    // Any key stops the auto-boot timer; if no key is pressed for COUNTDOWN_SECS
-    // the mode I (Intel HD: AppleSetOs + mux + Radeon OFF + injects) is started.
-    BOOT_MODE Sel = MODE_INTEL;
+    // Up/Down = move, Enter/Space = confirm, D/A/H/I = pick and confirm at once,
+    // X = save the highlighted mode as the default (marked x). Any key stops the auto-boot
+    // timer; if no key is pressed for COUNTDOWN_SECS the default mode is started.
+    BOOT_MODE Def = DefaultLoad(BS, ImageHandle);
+    BOOT_MODE Sel = Def;
     BOOLEAN TimerOn = TRUE;
     BOOLEAN Chosen = FALSE;
     BOOLEAN Dirty = TRUE;
@@ -893,11 +916,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             LastSec = Sec;
             Dirty = FALSE;
 
-            MenuDraw(&gs, Sel);
+            MenuDraw(&gs, Sel, Def);
             if (TimerOn) {
                 UI_PRINT(&gs, TIMER_ROW,
-                    L"Auto-boot in %u s: [I] Intel HD   (any key stops the timer)",
-                    (UINT32)(COUNTDOWN_SECS - Sec));
+                    L"Auto-boot in %u s: [%c] default   (any key stops the timer)",
+                    (UINT32)(COUNTDOWN_SECS - Sec), ModeLetter[Def]);
             } else {
                 UI_PRINT(&gs, TIMER_ROW, L"Timer stopped - choose a mode and press Enter");
             }
@@ -923,24 +946,23 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 TimerOn = FALSE;
             } else if (c == 0x0D || c == 0x0A || c == L' ') {   // Enter / Space
                 Chosen = TRUE;
+            } else if (c == L'x' || c == L'X') {          // save the highlighted mode as default
+                EFI_STATUS DS = DefaultSave(BS, ImageHandle, Sel);
+                if (!EFI_ERROR(DS)) {
+                    Def = Sel;
+                    UI_STATUS(&gs, L"default saved: %s", MenuName[Def]);
+                } else {
+                    UI_STATUS(&gs, L"default NOT saved (%lX)", DS);
+                }
+                TimerOn = FALSE;
             } else if (c == L'd' || c == L'D') {
                 Sel = MODE_RADEON; Chosen = TRUE;
             } else if (c == L'a' || c == L'A') {
                 Sel = MODE_RADEON_INTEL; Chosen = TRUE;
-            } else if (c == L'p' || c == L'P') {
-                Sel = MODE_PATCH; Chosen = TRUE;
-            } else if (c == L'k' || c == L'K') {
-                Sel = MODE_PATCH_LANES; Chosen = TRUE;
-            } else if (c == L'j' || c == L'J') {
-                Sel = MODE_MUX_LANES; Chosen = TRUE;
             } else if (c == L'h' || c == L'H') {
                 Sel = MODE_MUX_LANES_PATCH; Chosen = TRUE;
             } else if (c == L'i' || c == L'I') {
                 Sel = MODE_INTEL; Chosen = TRUE;
-            } else if (c == L'u' || c == L'U') {
-                Sel = MODE_INTEL_KEEP; Chosen = TRUE;
-            } else if (c == L'l' || c == L'L') {
-                Sel = MODE_INTEL_LOG; Chosen = TRUE;
             } else {
                 TimerOn = FALSE;                       // any other key just stops the timer
             }
@@ -950,26 +972,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         }
 
         if (!Chosen && TimerOn && Tick >= (UINT32)(COUNTDOWN_SECS * TICKS_PER_SEC))
-            Chosen = TRUE;                             // timeout: mode I
+            Chosen = TRUE;                             // timeout: default mode
     }
 
     switch (Sel) {
     case MODE_RADEON_INTEL:
         DoSetOs = TRUE;
-        break;
-    case MODE_PATCH:
-        DoSetOs = TRUE;
-        DoPatchOnly = TRUE;
-        break;
-    case MODE_PATCH_LANES:
-        DoSetOs = TRUE;
-        DoPatchOnly = TRUE;
-        DoLanes = TRUE;
-        break;
-    case MODE_MUX_LANES:
-        DoSetOs = TRUE;
-        DoSwitch = TRUE;
-        DoAcpi = TRUE;                                 // no DoRailOff (Radeon stays powered), no DoVbt
         break;
     case MODE_MUX_LANES_PATCH:
         DoSetOs = TRUE;
@@ -983,20 +991,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         DoRailOff = TRUE;
         DoVbt = TRUE;
         DoAcpi = TRUE;
-        break;
-    case MODE_INTEL_KEEP:
-        DoSetOs = TRUE;
-        DoSwitch = TRUE;                               // no DoRailOff: Radeon stays powered
-        DoVbt = TRUE;
-        DoAcpi = TRUE;
-        break;
-    case MODE_INTEL_LOG:
-        DoSetOs = TRUE;
-        DoSwitch = TRUE;
-        DoRailOff = TRUE;
-        DoVbt = TRUE;
-        DoAcpi = TRUE;
-        DoDump = TRUE;
         break;
     default:
         break;                                         // MODE_RADEON: nothing is touched
@@ -1027,7 +1021,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         DoRegsDump(BS, ImageHandle, &gs, N4, L"before", PR_REGS_BEFORE);
     }
 
-    // load apple_set_os - only for A / P / K / J / H / I / U / L; D = plain Windows boot
+    // load apple_set_os - only for A / H / I; D = plain Windows boot
     if (!DoSetOs) {
         LOG(&gs, PR_SETOS, L"AppleSetOs: not loaded");
     } else if (AppleSetOsHandleCount == 0) {
@@ -1078,7 +1072,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     if (AppleSetOsHandleBuf != NULL)
         _INT_FreePool(BS, AppleSetOsHandleBuf);
 
-    // ---- J / H / I / U / L: gmux panel switch, (not J / U: dGPU rail OFF), (I / U / L: VBT inject) ----
+    // ---- H / I: gmux panel switch, dGPU rail OFF, (I: VBT inject) ----
     // Never power the dGPU rail back on from Windows after OFF (known hang on this HW).
     if (DoSwitch) {
         GMUX_IRQ_SAVE IrqSave;
@@ -1093,8 +1087,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         }
 
         if (!DoRailOff) {
-            // Modes J / U: panel on the iGPU, the Radeon stays powered (it is the render GPU).
-            LOG(&gs, PR_RAIL, L"Gmux: dGPU rail left ON (mode J / U)");
+            // Panel on the iGPU, the Radeon stays powered (it is the render GPU).
+            LOG(&gs, PR_RAIL, L"Gmux: dGPU rail left ON");
         } else if (!MuxOk) {
             // Cutting the rail while the panel is still routed to the Radeon blacks the screen.
             LOG(&gs, PR_RAIL, L"Gmux: dGPU rail OFF SKIPPED (panel not confirmed on iGPU)");
@@ -1149,7 +1143,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             LOG(&gs, PR_VBT, L"VBT inject: %s (%lX), EDID from dGPU: %s", EFI_ERROR(IS) ? L"FAILED" : L"OK", IS,
                 EFI_ERROR(ES) ? L"not applied" : L"applied");
         } else {
-            LOG(&gs, PR_VBT, L"VBT inject: skipped (mode %s)", Sel == MODE_MUX_LANES ? L"J" : L"H");
+            LOG(&gs, PR_VBT, L"VBT inject: skipped (mode %s)", L"H");
         }
         LOG(&gs, PR_DDI, L"DDI A 4 lanes: %s (%lX)", EFI_ERROR(LS) ? L"FAILED" : L"OK", LS);
         if (DoAcpi) {
@@ -1158,26 +1152,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         } else {
             LOG(&gs, PR_ACPI, L"ACPI patch: skipped");
         }
-    }
-
-    // ---- P / K: ACPI patch (+ K: DDI A 4 lanes); no mux, no rail, no VBT ----
-    if (DoPatchOnly) {
-        const UINTN RCap = 4096;
-        CHAR8 *RBuf = (CHAR8 *)_INT_AllocatePool(BS, RCap);
-        EFI_STATUS AS = EFI_OUT_OF_RESOURCES;
-        EFI_STATUS LS = EFI_OUT_OF_RESOURCES;
-        if (RBuf != NULL) {
-            _INT_Rep IR;
-            _INT_RepInit(&IR, RBuf, RCap);
-            if (DoLanes)
-                LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
-            AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, L"\\SSDT_IGPU.aml", &IR);
-            _INT_FreePool(BS, RBuf);
-        }
-        if (DoLanes)
-            LOG(&gs, PR_DDI, L"DDI A 4 lanes: %s (%lX)", EFI_ERROR(LS) ? L"FAILED" : L"OK", LS);
-        LOG(&gs, PR_ACPI, L"ACPI patch SSDT_IGPU.aml: %s (%lX)",
-            AS == EFI_NOT_FOUND ? L"not found, skipped" : (EFI_ERROR(AS) ? L"FAILED" : L"OK"), AS);
     }
 
     if (DoDump) {
