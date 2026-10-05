@@ -97,6 +97,7 @@ Follow docs/ACPI_PATCH_GUIDE.md and docs/VBT_GUIDE.md from the project archive s
 Attached: panel EDID (edid_*.bin), DSDT and SSDT dumps (*.dat), the project archive.
 Give me the ready files: t2gmux_vbt.bin, SSDT_IGPU.aml (mode 4) and/or SSDT_IGPU_VBT.aml (mode 3).
 Show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
+After that copy vbt and aml to output
 ```
 
 Claude returns the files for the chosen mode. They are built from your dumps and were not run on
