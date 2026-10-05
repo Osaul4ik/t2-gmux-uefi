@@ -13,11 +13,12 @@ When the Mac starts, the loader shows a menu with four modes. You pick one (or i
 |-----|------|--------------|
 | **1** | Standard Boot | Clean boot without AppleSetOs or patches. Windows starts as if the loader was not there. |
 | **2** | Boot + Apple_set_os | Standard boot + the apple_set_os patch. Windows sees both GPUs (Radeon and Intel HD). |
-| **3** | Integrated gfx | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT (panel data) is inside the ACPI patch. |
+| **3** | Integrated gfx (**recommended**) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT (panel data) is inside the ACPI patch. |
 | **4** | Integrated gfx + separate VBT | Same as 3, but the VBT is a separate file injected by the loader (it also takes the panel timing from the Radeon). **Default.** |
 
-Modes 3 and 4 give the same result. Use the one whose files you have prepared (see below). If the
-panel stays dark in one of them, try the other.
+Modes 3 and 4 both move Windows to the Intel iGPU, but they behave differently after a graphics driver
+restart (see **What to expect**). **Mode 3 is recommended.** Use mode 4 only if you need the separate
+VBT file.
 
 ## What you need to prepare
 
@@ -165,6 +166,15 @@ docker run --rm -v "$(pwd):/build" apple_set_os_loader make clean all
   saved in `t2gmux_default.txt` on the EFI partition; delete the file to go back to mode 4). X only saves,
   it does not start anything.
 - The bottom of the screen lists the graphics cards the loader sees.
+
+## What to expect
+
+- After the switch to the Intel iGPU the picture appears **on the Windows login screen**. Nothing is
+  shown on the built-in display before that (no boot logo, no loader screen after the switch).
+- **Mode 3 (recommended, full patch):** the screen survives a restart of the graphics driver, for example
+  **Win + Ctrl + Shift + B**.
+- **Mode 4:** after **Win + Ctrl + Shift + B** (graphics driver restart) the screen goes **black**. Do not
+  use that shortcut in mode 4; restart the Mac to get the picture back.
 
 ## Warnings
 
