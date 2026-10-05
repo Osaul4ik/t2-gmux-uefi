@@ -88,6 +88,96 @@ static UINT8* FindDsdt(UINT8* Xsdt, UINTN N)
     return NULL;
 }
 
+// ---------------------------------------------------------------------------
+// ACPI role rename (all AML tables, in memory, same-length NameSeg swap):
+//   IGPU (Intel iGPU, \_SB.PCI0.IGPU)           -> GFX0  (takes the dGPU role/name)
+//   GFX0 (Radeon, ...PEG0.EGP0.EGP1.GFX0)       -> EGFX  (eGPU)
+// Every occurrence in the DSDT, every firmware SSDT and the injected SSDT is renamed in
+// one pass, so all paths and references stay consistent; _ADR / PCI binding is untouched.
+// Everything is verified and reverted if any table is not writable.
+// ---------------------------------------------------------------------------
+#define ROLE_MAX_CHG   128
+#define ROLE_MAX_TBL   32
+
+typedef struct { UINT8* T; UINT32 Off; UINT8 Was; } ROLE_CHG;   // Was: 0 = IGPU, 1 = GFX0
+
+static UINTN RoleScan(UINT8* T, ROLE_CHG* C, UINTN n, BOOLEAN* Over)
+{
+    UINT32 L = _INT_Rd32(T + ACPI_HDR_LEN);
+    for (UINTN i = ACPI_HDR_SIZE; i + 4 <= L; ) {
+        UINT8 was = 0xFF;
+        if (SigEq(T + i, "IGPU", 4)) was = 0;
+        else if (SigEq(T + i, "GFX0", 4)) was = 1;
+        if (was == 0xFF) { i++; continue; }
+        if (n < ROLE_MAX_CHG) { C[n].T = T; C[n].Off = (UINT32)i; C[n].Was = was; }
+        else *Over = TRUE;
+        n++;
+        i += 4;
+    }
+    return n;
+}
+
+static VOID RoleWrite(volatile UINT8* p, const char* nm)
+{
+    for (UINTN k = 0; k < 4; k++) p[k] = (UINT8)nm[k];
+}
+
+static VOID RoleFixCsum(UINT8* T)
+{
+    UINT32 L = _INT_Rd32(T + ACPI_HDR_LEN);
+    T[ACPI_HDR_CSUM] = 0;
+    T[ACPI_HDR_CSUM] = (UINT8)(0 - Sum8(T, L));
+}
+
+static EFI_STATUS RoleRename(UINT8* Xsdt, UINTN N, UINT8* NewSsdt, _INT_Rep* R)
+{
+    static ROLE_CHG C[ROLE_MAX_CHG];
+    UINT8* Tbl[ROLE_MAX_TBL];
+    UINTN NT = 0, NC = 0;
+    BOOLEAN Over = FALSE;
+
+    UINT8* Ds = FindDsdt(Xsdt, N);
+    if (Ds && SigEq(Ds, "DSDT", 4)) Tbl[NT++] = Ds;
+    for (UINTN i = 0; i < N; i++) {
+        UINT8* T = (UINT8*)(UINTN)_INT_Rd64(Xsdt + ACPI_HDR_SIZE + i * 8);
+        if (!T || !SigEq(T, "SSDT", 4)) continue;
+        if (NT >= ROLE_MAX_TBL - 1) { S("  role rename: too many tables, skipped"); NL(); return EFI_UNSUPPORTED; }
+        Tbl[NT++] = T;
+    }
+    Tbl[NT++] = NewSsdt;
+
+    for (UINTN t = 0; t < NT; t++)
+        NC = RoleScan(Tbl[t], C, NC, &Over);
+    if (Over) { S("  role rename: more than 128 names, skipped"); NL(); return EFI_UNSUPPORTED; }
+    if (NC == 0) { S("  role rename: no IGPU/GFX0 names found, skipped"); NL(); return EFI_NOT_FOUND; }
+
+    // apply
+    for (UINTN k = 0; k < NC; k++)
+        RoleWrite(C[k].T + C[k].Off, C[k].Was == 0 ? "GFX0" : "EGFX");
+    for (UINTN t = 0; t < NT; t++) RoleFixCsum(Tbl[t]);
+
+    // verify (memory may be read-only)
+    BOOLEAN Ok = TRUE;
+    for (UINTN k = 0; k < NC && Ok; k++) {
+        const char* want = C[k].Was == 0 ? "GFX0" : "EGFX";
+        volatile UINT8* p = C[k].T + C[k].Off;
+        for (UINTN j = 0; j < 4; j++) if (p[j] != (UINT8)want[j]) Ok = FALSE;
+    }
+    for (UINTN t = 0; t < NT && Ok; t++)
+        if (Sum8(Tbl[t], _INT_Rd32(Tbl[t] + ACPI_HDR_LEN)) != 0) Ok = FALSE;
+
+    if (!Ok) {
+        for (UINTN k = 0; k < NC; k++)
+            RoleWrite(C[k].T + C[k].Off, C[k].Was == 0 ? "IGPU" : "GFX0");
+        for (UINTN t = 0; t < NT; t++) RoleFixCsum(Tbl[t]);
+        S("  role rename: table memory not writable, REVERTED"); NL();
+        return EFI_ACCESS_DENIED;
+    }
+
+    S("  role rename: IGPU->GFX0, GFX0->EGFX, "); DC(NC); S(" names in "); DC(NT); S(" tables"); NL();
+    return EFI_SUCCESS;
+}
+
 EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
                                EFI_HANDLE ImageHandle, CHAR16* Name, _INT_Rep* R)
 {
@@ -297,6 +387,12 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
             S("  old RSDP updated in place too"); NL();
         }
     }
+
+#if ACPI_ROLE_RENAME
+    // Swap the ACPI roles of the two GPUs (see RoleRename). Best effort: on any problem the
+    // names are put back and the brightness patch above stays active.
+    RoleRename(Xsdt, N, NewSsdt, R);
+#endif
 
     S("  OK: _BCM->XBCM"); if (WantWak) S(", _WAK->XWAK"); if (WantPts) S(", _PTS->XPTS");
     S(", new SSDT at "); HX((UINT64)(UINTN)NewSsdt, 8);

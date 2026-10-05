@@ -567,3 +567,132 @@ BOOLEAN _INT_IgpuVisible(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle)
     EFI_STATUS Status;
     return FindIgpu(BS, ImageHandle, &Id, &Status) != NULL;
 }
+
+// ---------------------------------------------------------------------------
+// Substitute the panel timing in the injected VBT with the EDID the firmware
+// published for the dGPU. Apple's EFI only provides panel data for the Radeon
+// (its GOP handle carries the EDID protocol); the iGPU OpRegion VBT mailbox is
+// empty, so the VBT built from the template has to be given the dGPU's panel.
+// ---------------------------------------------------------------------------
+#define BDB_LFP_OPTIONS_ID   40
+#define BDB_LFP_DATA_PTRS_ID 41
+
+static BOOLEAN EdidLooksInternal(const UINT8* e, UINTN n)
+{
+    static const UINT8 hdr[8] = { 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+    UINT8 sum = 0;
+    if (!e || n < 128) return FALSE;
+    for (UINTN i = 0; i < 8; i++) if (e[i] != hdr[i]) return FALSE;
+    for (UINTN i = 0; i < 128; i++) sum = (UINT8)(sum + e[i]);
+    if (sum != 0) return FALSE;
+    if (e[8] != 0x06 || e[9] != 0x10) return FALSE;      // manufacturer "APP"
+    if (e[54] == 0 && e[55] == 0) return FALSE;          // first descriptor must be a DTD
+    return TRUE;
+}
+
+static const UINT8* FindFirmwareEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                     UINTN* SizeOut, const char** SrcOut)
+{
+    EFI_GUID guids[2] = { EFI_EDID_ACTIVE_PROTOCOL_GUID, EFI_EDID_DISCOVERED_PROTOCOL_GUID };
+    static const char* names[2] = { "EDID active", "EDID discovered" };
+    (void)ImageHandle;
+
+    for (UINTN g = 0; g < 2; g++) {
+        EFI_HANDLE* Handles = NULL;
+        UINTN Count = 0;
+        if (EFI_ERROR(BS->LocateHandleBuffer(ByProtocol, &guids[g], NULL, &Count, &Handles)))
+            continue;
+        for (UINTN i = 0; i < Count; i++) {
+            EFI_EDID_ACTIVE_PROTOCOL* P = NULL;      // same layout as the discovered one
+            if (EFI_ERROR(BS->HandleProtocol(Handles[i], &guids[g], (VOID**)&P)) || !P)
+                continue;
+            if (EdidLooksInternal(P->Edid, P->SizeOfEdid)) {
+                *SizeOut = P->SizeOfEdid;
+                *SrcOut = names[g];
+                return P->Edid;
+            }
+        }
+    }
+    return NULL;
+}
+
+EFI_STATUS _INT_VbtApplyFirmwareEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                     _INT_Rep* R)
+{
+    EFI_STATUS Status;
+    UINT32 Id = 0;
+    UINTN EdidSize = 0;
+    const char* Src = NULL;
+
+    EFI_PCI_IO_PROTOCOL* Igpu = FindIgpu(BS, ImageHandle, &Id, &Status);
+    if (!Igpu) { S("EDID subst: no Intel iGPU found"); NL(); return EFI_NOT_FOUND; }
+
+    UINT32 asls = 0;
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, IGPU_PCI_ASLS, 1, &asls);
+    if (asls == 0 || asls == 0xFFFFFFFF) { S("EDID subst: no OpRegion"); NL(); return EFI_NOT_FOUND; }
+
+    UINT8* v = (UINT8*)(UINTN)asls + OPREGION_VBT_OFF;
+    if (!IsVbt(v)) { S("EDID subst: no VBT in mailbox 4 (inject first)"); NL(); return EFI_NOT_FOUND; }
+
+    const UINT8* edid = FindFirmwareEdid(BS, ImageHandle, &EdidSize, &Src);
+    if (!edid) {
+        S("EDID subst: firmware exposes no internal-panel (APP) EDID, VBT timing kept"); NL();
+        return EFI_NOT_FOUND;
+    }
+
+    UINTN vsz = _INT_Rd16(v + 24);
+    UINTN bdb = _INT_Rd32(v + 28);
+    if (vsz < 64 || vsz > OPREGION_VBT_MAX || bdb + 22 > vsz) {
+        S("EDID subst: bad VBT header"); NL();
+        return EFI_COMPROMISED_DATA;
+    }
+    UINTN hdr = _INT_Rd16(v + bdb + 18);
+    UINTN bend = bdb + _INT_Rd16(v + bdb + 20);
+    if (bend > vsz) bend = vsz;
+
+    // locate BDB 40 (panel index) and BDB 41 (LFP data pointers)
+    UINTN o40 = 0, o41 = 0, s41 = 0;
+    for (UINTN pos = bdb + hdr; pos + 3 <= bend; ) {
+        UINT8 bid = v[pos];
+        UINTN bsz = _INT_Rd16(v + pos + 1);
+        if (pos + 3 + bsz > bend) break;
+        if (bid == BDB_LFP_OPTIONS_ID && !o40) o40 = pos + 3;
+        if (bid == BDB_LFP_DATA_PTRS_ID && !o41) { o41 = pos + 3; s41 = bsz; }
+        pos += 3 + bsz;
+    }
+    if (!o40 || !o41) { S("EDID subst: VBT lacks BDB 40/41"); NL(); return EFI_NOT_FOUND; }
+
+    UINTN panel = v[o40];
+    if (panel >= 16) panel = 0;
+    UINTN e = o41 + 1 + panel * 9;
+    if (e + 6 > o41 + s41) { S("EDID subst: BDB 41 too short"); NL(); return EFI_COMPROMISED_DATA; }
+
+    UINTN fp = bdb + _INT_Rd16(v + e);
+    UINTN dv = bdb + _INT_Rd16(v + e + 3);
+    if (fp + 4 > vsz || dv + 18 > vsz) { S("EDID subst: timing offsets outside VBT"); NL(); return EFI_COMPROMISED_DATA; }
+
+    const UINT8* d = edid + 54;
+    UINT16 hact = (UINT16)(d[2] | ((d[4] >> 4) << 8));
+    UINT16 vact = (UINT16)(d[5] | ((d[7] >> 4) << 8));
+    UINT32 oldclk = _INT_Rd16(v + dv);
+    UINT32 newclk = _INT_Rd16(d);
+
+    v[fp + 0] = (UINT8)(hact & 0xFF); v[fp + 1] = (UINT8)(hact >> 8);
+    v[fp + 2] = (UINT8)(vact & 0xFF); v[fp + 3] = (UINT8)(vact >> 8);
+    for (UINTN i = 0; i < 18; i++) v[dv + i] = d[i];
+
+    // whole VBT must sum to zero
+    v[26] = 0;
+    UINT8 sum = 0;
+    for (UINTN i = 0; i < vsz; i++) sum = (UINT8)(sum + v[i]);
+    v[26] = (UINT8)(0 - sum);
+
+    // read back
+    BOOLEAN ok = TRUE;
+    for (UINTN i = 0; i < 18; i++) if (v[dv + i] != d[i]) { ok = FALSE; break; }
+
+    S("EDID subst: "); S(Src); S(" ("); DC(EdidSize); S(" bytes) -> VBT panel "); DC(panel);
+    S(": "); DC(hact); S("x"); DC(vact); S(", clock "); DC(oldclk * 10); S(" -> "); DC(newclk * 10);
+    S(" kHz, readback "); S(ok ? "OK" : "MISMATCH"); NL();
+    return ok ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+}

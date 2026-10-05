@@ -15,15 +15,17 @@ confirms), or press its letter to start it at once. If no key is pressed for 5 s
 |-----|------|----------------|---------------|-----------|--------------|
 | **D** | Only AMD Radeon | no | no | no | plain Windows boot: **no AppleSetOs**, no gmux, no injects, no files |
 | **A** | AMD Radeon + Intel HD | no | no | no | **AppleSetOs only**: no gmux, no VBT/`DDI_A_4_LANES`/ACPI patches, no files; then boots Windows |
+| **P** | AppleSetOs + ACPI patch | no | no | no | **AppleSetOs + ACPI patch only**: loads AppleSetOs, then applies `\\SSDT_IGPU.aml` (if present). No gmux, no rail, no VBT/`DDI_A_4_LANES`, no files |
 | **I** | Intel HD (auto after 5 s, selected at start) | yes | yes | no | AppleSetOs + full switch to the iGPU: mux + Radeon rail OFF + VBT injection + `DDI_A_4_LANES` + ACPI patch (if `\SSDT_IGPU.aml` exists) |
+| **U** | Intel HD, Radeon ON | yes | **no** | no | same as I, but the Radeon rail is **not** switched off: AppleSetOs + mux + VBT injection + `DDI_A_4_LANES` + ACPI patch |
 | **L** | Intel HD + Logs | yes | yes | yes | same as I, plus OpRegion/VBT/register dumps before/after and `inject.txt` |
 
-AppleSetOs is loaded only for A, I and L (for I and L the iGPU has to become visible). D skips it.
+AppleSetOs is loaded for A, P, I, U and L (the iGPU has to become visible). D skips it.
 I writes nothing to the ESP; the result is only shown on screen.
 
-## ACPI patch for brightness (I, L)
+## ACPI patch for brightness (P, I, U, L)
 
-If `\SSDT_IGPU.aml` exists in the ESP root, keys **I** and **L** also apply an ACPI patch before
+If `\SSDT_IGPU.aml` exists in the ESP root, keys **P**, **I**, **U** and **L** apply an ACPI patch before
 Windows starts (no file = skipped, nothing is touched):
 
 1. the only `_BCM` of the firmware table `SaSsdt` (`\_SB.PCI0.IGPU.DD1F._BCM`) is renamed to `XBCM`
@@ -36,6 +38,33 @@ The SSDT defines the new `DD1F._BCM`: it calls the original `XBCM` (Intel path) 
 one `_BCM` in SaSsdt, memory writable; on any later failure the rename is reverted. The result is
 shown on screen (row 21); with **L** it is also written to `t2gmux_L_<boot>_inject.txt`.
 
+## ACPI role rename (P, I, U, L; with `\SSDT_IGPU.aml`)
+
+Together with the ACPI patch the loader swaps the GPU roles in the ACPI namespace, in memory:
+
+- `IGPU` (Intel iGPU, `\_SB.PCI0.IGPU`) -> `GFX0` (takes the dGPU name)
+- `GFX0` (Radeon, `...PEG0.EGP0.EGP1.GFX0`) -> `EGFX` (eGPU)
+
+Every NameSeg occurrence in the DSDT, all firmware SSDTs and the injected SSDT is renamed in one pass
+(same length, checksums fixed), so all paths and references stay consistent; `_ADR` and the PCI
+binding do not change. The old `SSDT_IGPU.aml` keeps working because it is renamed the same way.
+Everything is read back and reverted if any table is not writable. The screen/log line is
+`role rename: IGPU->GFX0, GFX0->EGFX, N names in M tables`. Set `ACPI_ROLE_RENAME` to 0 in
+`include/int_acpi.h` to disable it. Boot with **D** or **A** (no patch at all) if Windows does not start.
+
+## Panel data from the dGPU (EDID substitution, I / U / L)
+
+Apple's EFI publishes panel data only for the Radeon (its GOP handle carries the EDID protocol);
+the iGPU has an empty VBT mailbox. After `t2gmux_vbt.bin` is injected, the loader looks for an
+internal-panel EDID (EDID active protocol first, then discovered; manufacturer `APP`, valid header
+and checksum, first descriptor is a DTD) and writes its first DTD and the active size into the
+injected VBT (BDB 41 for the panel index from BDB 40), then fixes the VBT checksum. If the firmware
+exposes no such EDID, the timing from the file is kept. Screen row 8 shows `EDID from dGPU:
+applied / not applied`; the details (old -> new pixel clock) are in `inject.txt` with **L**.
+
+Only the panel timing is substituted. Link rate, lanes and fast-link bits still come from the VBT
+file, because the firmware does not publish them.
+
 ## Backlight in the VBT
 
 `tools/make_vbt.py` writes the VBT backlight block (BDB 43) as **type NONE** by default
@@ -43,16 +72,16 @@ shown on screen (row 21); with **L** it is also written to `t2gmux_L_<boot>_inje
 (port 0x74, driven through ACPI `_BCM`, see the SSDT patch above), not by an Intel PWM, so the
 Intel driver must not claim a PWM it cannot use.
 
-## What the mux/rail keys do (I, L)
+## What the mux/rail keys do (I, U, L)
 
 Sequence follows Linux `apple-gmux` (T2 MMIO gmux):
 
 1. interrupt mask (0x14) is saved and set to 0xFF, stale status (0x16) cleared
 2. DDC (0x28)=iGPU, panel (0x10)=iGPU, external (0x40)=dGPU (Thunderbolt Macs);
    panel readback (0x10 bit 0) is verified, up to 3 attempts
-3. rail OFF (0x50: 1, then 0) **only if step 2 was confirmed** - otherwise it is
+3. rail OFF (0x50: 1, then 0) **only for I / L and only if step 2 was confirmed** - otherwise it is
    skipped, since cutting the Radeon while the panel is still routed to it blacks
-   the screen
+   the screen; **U** skips this step on purpose and leaves the Radeon powered
 4. the POWER bit in 0x16 is polled (like Linux waits for the GPE); if it never
    shows, a fixed 250 ms delay is used
 5. status is cleared and the original mask is restored

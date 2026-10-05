@@ -68,6 +68,11 @@ EFI_STATUS _INT_ReadEspFile(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                           CHAR16* Name, _INT_Rep* R);
 
+// Substitute the panel timing of the injected VBT (OpRegion+0x400) with the internal-panel
+// EDID the firmware publishes on the dGPU GOP handle (EDID active/discovered protocol).
+EFI_STATUS _INT_VbtApplyFirmwareEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                     _INT_Rep* R);
+
 // Set DDI_BUF_CTL(A).DDI_A_4_LANES in the iGPU so i915/Windows see 4 lanes on DDI A.
 EFI_STATUS _INT_IgpuForceDdiA4Lanes(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                                     _INT_Rep* R);
