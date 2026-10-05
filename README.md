@@ -16,9 +16,9 @@ confirms), or press its letter to start it at once. If no key is pressed for 5 s
 | **D** | Only AMD Radeon | no | no | no | plain Windows boot: **no AppleSetOs**, no gmux, no injects, no files |
 | **A** | AMD Radeon + Intel HD | no | no | no | **AppleSetOs only**: no gmux, no VBT/`DDI_A_4_LANES`/ACPI patches, no files; then boots Windows |
 | **P** | AppleSetOs + ACPI patch | no | no | no | **AppleSetOs + ACPI patch only**: loads AppleSetOs, then applies `\\SSDT_IGPU.aml` (if present). No gmux, no rail, no VBT/`DDI_A_4_LANES`, no files |
-| **K** | ACPI patch + 4 lanes | no | no | no | AppleSetOs + ACPI patch (`\\SSDT_IGPU.aml`, with the role rename) + `DDI_A_4_LANES`; **no VBT injection**, no gmux, no rail, no files |
-| **J** | Mux Intel + ACPI patch, Radeon ON | yes | **no** | no | same as H, but the Radeon rail is **not** switched off: AppleSetOs + mux panel->iGPU + `DDI_A_4_LANES` + ACPI patch (`\\SSDT_IGPU.aml`, with the role rename); **no VBT injection**, no files |
-| **H** | Mux Intel + 4 lanes + ACPI patch | yes | **yes** | no | AppleSetOs + mux panel->iGPU + Radeon rail OFF + `DDI_A_4_LANES` + ACPI patch (`\\SSDT_IGPU.aml`, with the role rename); **no VBT injection**, no files |
+| **K** | ACPI patch + 4 lanes | no | no | no | AppleSetOs + ACPI patch (`\\SSDT_IGPU.aml`) + `DDI_A_4_LANES`; **no VBT injection**, no gmux, no rail, no files |
+| **J** | Mux Intel + ACPI patch, Radeon ON | yes | **no** | no | same as H, but the Radeon rail is **not** switched off: AppleSetOs + mux panel->iGPU + `DDI_A_4_LANES` + ACPI patch (`\\SSDT_IGPU.aml`); **no VBT injection**, no files |
+| **H** | Mux Intel + 4 lanes + ACPI patch | yes | **yes** | no | AppleSetOs + mux panel->iGPU + Radeon rail OFF + `DDI_A_4_LANES` + ACPI patch (`\\SSDT_IGPU.aml`); **no VBT injection**, no files |
 | **I** | Intel HD (auto after 5 s, selected at start) | yes | yes | no | AppleSetOs + full switch to the iGPU: mux + Radeon rail OFF + VBT injection + `DDI_A_4_LANES` + ACPI patch (if `\SSDT_IGPU.aml` exists) |
 | **U** | Intel HD, Radeon ON | yes | **no** | no | same as I, but the Radeon rail is **not** switched off: AppleSetOs + mux + VBT injection + `DDI_A_4_LANES` + ACPI patch |
 | **L** | Intel HD + Logs | yes | yes | yes | same as I, plus OpRegion/VBT/register dumps before/after and `inject.txt` |
@@ -40,20 +40,6 @@ The SSDT defines the new `DD1F._BCM`: it calls the original `XBCM` (Intel path) 
 `GFX0.ABCM` (gmux port 0x74 = pct * 0xFFFF / 100). Checks: SSDT signature/length/checksum, exactly
 one `_BCM` in SaSsdt, memory writable; on any later failure the rename is reverted. The result is
 shown on screen (row 21); with **L** it is also written to `t2gmux_L_<boot>_inject.txt`.
-
-## ACPI role rename (P, K, J, H, I, U, L; with `\SSDT_IGPU.aml`)
-
-Together with the ACPI patch the loader swaps the GPU roles in the ACPI namespace, in memory:
-
-- `IGPU` (Intel iGPU, `\_SB.PCI0.IGPU`) -> `GFX0` (takes the dGPU name)
-- `GFX0` (Radeon, `...PEG0.EGP0.EGP1.GFX0`) -> `EGFX` (eGPU)
-
-Every NameSeg occurrence in the DSDT, all firmware SSDTs and the injected SSDT is renamed in one pass
-(same length, checksums fixed), so all paths and references stay consistent; `_ADR` and the PCI
-binding do not change. The old `SSDT_IGPU.aml` keeps working because it is renamed the same way.
-Everything is read back and reverted if any table is not writable. The screen/log line is
-`role rename: IGPU->GFX0, GFX0->EGFX, N names in M tables`. Set `ACPI_ROLE_RENAME` to 0 in
-`include/int_acpi.h` to disable it. Boot with **D** or **A** (no patch at all) if Windows does not start.
 
 ## Panel data from the dGPU (EDID substitution, I / U / L)
 

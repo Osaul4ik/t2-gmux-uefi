@@ -805,7 +805,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     //   P = AppleSetOs + ACPI patch only: no gmux, no rail, no VBT/DDI, no files
     //   K = like P, plus DDI A 4 lanes (DDI_A_4_LANES): still no VBT, no gmux, no rail
     //   U = Intel HD, Radeon ON: same as I, but the Radeon rail is NOT switched off
-    //   H = Mux Intel + 4 lanes + ACPI patch: AppleSetOs + mux->iGPU + Radeon rail OFF + DDI A 4 lanes + ACPI patch (SSDT_IGPU.aml + role rename); no VBT injection, no files
+    //   H = Mux Intel + 4 lanes + ACPI patch: AppleSetOs + mux->iGPU + Radeon rail OFF + DDI A 4 lanes + ACPI patch (SSDT_IGPU.aml); no VBT injection, no files
     //   J = like H, but the Radeon rail is NOT switched off (Radeon stays powered); no VBT injection, no files
     BOOLEAN DoSetOs = FALSE;   // A / P / K / J / H / I / U / L: load AppleSetOs (the iGPU becomes visible)
     BOOLEAN DoSwitch = FALSE;  // J / H / I / U / L: mux->iGPU + DDI A 4 lanes (+ VBT / ACPI patch, see below)

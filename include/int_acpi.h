@@ -5,13 +5,6 @@
 #include <efidef.h>
 #include "int_vbt.h"
 
-// 1 = also swap the ACPI roles of the GPUs in memory (all tables, same-length names):
-//     IGPU -> GFX0 (Intel takes the dGPU name), GFX0 -> EGFX (Radeon becomes the eGPU name).
-//     0 = brightness patch only.
-#ifndef ACPI_ROLE_RENAME
-#define ACPI_ROLE_RENAME 1
-#endif
-
 // ACPI patch for the Intel panel brightness (keys I / U).
 //
 // Reads a compiled SSDT (default \SSDT_IGPU.aml in the ESP root) and:
