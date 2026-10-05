@@ -7,7 +7,7 @@
 
 // ACPI patch for the Intel panel brightness (modes 3 / 4).
 //
-// Reads a compiled SSDT (default \SSDT_IGPU.aml in the ESP root) and:
+// Reads a compiled SSDT (\SSDT_IGPU_VBT.aml for mode 3, \SSDT_IGPU.aml for mode 4, in the ESP root) and:
 //   1. renames the single method "_BCM" of the firmware table "SaSsdt"
 //      (\_SB.PCI0.IGPU.DD1F._BCM) to "XBCM" in memory, fixing the checksum
 //   2. appends the SSDT to a copy of the XSDT (EfiACPIReclaimMemory) and

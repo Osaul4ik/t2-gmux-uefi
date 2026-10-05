@@ -23,8 +23,18 @@ X only saves, it does not boot.
 |-----|------|----------------|---------------|--------------|
 | **1** | Standard Boot | no | no | clean boot **without AppleSetOs**, gmux, injects or ACPI patches, no files |
 | **2** | Boot + Apple_set_os | no | no | standard boot + the **apple_set_os patch** (AppleSetOs only): no gmux, no VBT / `DDI_A_4_LANES` / ACPI patches, no files; then boots Windows |
-| **3** | Integrated gfx | yes | **yes** | AppleSetOs + mux panel->iGPU + Radeon rail OFF + `DDI_A_4_LANES` + ACPI patch (`\SSDT_IGPU.aml`); **no VBT injection from UEFI** (the VBT can come from the SSDT, see the guide), no files |
-| **4** | Integrated gfx + separate VBT (default) | yes | yes | everything from 3 + VBT injection from a separate file (`\t2gmux_vbt.bin`) + EDID timing from the dGPU |
+| **3** | Integrated gfx | yes | **yes** | AppleSetOs + mux panel->iGPU + Radeon rail OFF + `DDI_A_4_LANES` + full ACPI patch **with the VBT inside the SSDT** (`\SSDT_IGPU_VBT.aml`); no VBT injection from UEFI, no files |
+| **4** | Integrated gfx + separate VBT (default) | yes | yes | everything from 3, but with the ACPI patch **without VBT** (`\SSDT_IGPU.aml`) + separate VBT injected from UEFI (`\t2gmux_vbt.bin`) + EDID timing from the dGPU |
+
+**Required files.** A mode whose files are missing in the ESP root cannot be started: the menu stays,
+the timer stops and the status line says which file is missing. This also applies to the auto-boot
+default (e.g. a missing file stops the countdown instead of booting a half-configured mode).
+
+| Mode | Files in the ESP root |
+|------|-----------------------|
+| 1, 2 | none |
+| 3 | `SSDT_IGPU_VBT.aml` |
+| 4 | `SSDT_IGPU.aml` + `t2gmux_vbt.bin` |
 
 AppleSetOs is loaded for modes 2, 3 and 4 (the iGPU has to become visible). Mode 1 skips it.
 The loader writes nothing to the ESP except `t2gmux_default.txt` (key X); the result of each step is
@@ -32,8 +42,8 @@ only shown on screen.
 
 ## ACPI patch (modes 3, 4)
 
-If `\SSDT_IGPU.aml` exists in the ESP root, modes **3** and **4** apply an ACPI patch before
-Windows starts (no file = skipped, nothing is touched):
+Modes **3** and **4** apply an ACPI patch before Windows starts: mode 3 uses `\SSDT_IGPU_VBT.aml`,
+mode 4 uses `\SSDT_IGPU.aml` (a missing file means the mode cannot be started):
 
 1. the only `_BCM` of the firmware table `SaSsdt` (`\_SB.PCI0.IGPU.DD1F._BCM`) is renamed to `XBCM`
    in memory; if the SSDT mentions `XWAK` / `XPTS`, the `_WAK` / `_PTS` of the DSDT (found through
@@ -89,10 +99,10 @@ the panel link itself, hence the VBT injection below).
 ## WARNING
 
 - After dGPU rail OFF (modes **3** / **4**), do **not** power Radeon back on from Windows.
-- Mode **3** does not inject a VBT from UEFI and cuts the Radeon rail: the iGPU only has a VBT if the firmware
-  booted from it (Intel boot) **or** if the SSDT carries one (`make_ssdt_igpu.py --vbt`). On a Radeon
-  boot without either, the OpRegion VBT mailbox is empty and the panel may stay dark.
-- Do not use an SSDT built with `--vbt` in mode **4**: AML runs after UEFI and would overwrite the
+- Mode **3** does not inject a VBT from UEFI and cuts the Radeon rail: its VBT comes from the SSDT
+  (`SSDT_IGPU_VBT.aml`, built with `make_ssdt_igpu.py --vbt`). Without that
+  file the mode is refused, since an empty OpRegion VBT mailbox can leave the panel dark.
+- Do not copy the `--vbt` SSDT as `SSDT_IGPU.aml` for mode **4**: AML runs after UEFI and would overwrite the
   VBT (and the EDID timing taken from the dGPU) with the file's timing.
 
 ## Install / build
@@ -115,10 +125,10 @@ not know an eDP panel sits on DDI A.
 2. `python tools/make_vbt.py --edid edid_1.bin --lanes 4 --rate hbr2`
    -> `t2gmux_vbt.bin` (built from a real coreboot Whiskey Lake VBT, see
    `tools/template/`; only the eDP child on DDI A stays enabled).
-3. Copy `t2gmux_vbt.bin` to the ESP root.
+3. Copy `t2gmux_vbt.bin` to the ESP root (together with `SSDT_IGPU.aml`).
 4. At the countdown press **4**. The loader copies the VBT into OpRegion+0x400 and re-reads it.
 
-(For mode 3 the same VBT can be delivered through ACPI instead, see the guide.)
+(Mode 3 delivers the VBT through ACPI instead: `SSDT_IGPU_VBT.aml`, see the guide.)
 
 Modes **3** and **4** also set `DDI_BUF_CTL(A).DDI_A_4_LANES` (bit 4, GTTMMADR+0x64000) in the iGPU. On
 gen < 11 i915 takes the DDI A lane limit from that bit, Apple's firmware sets it only when it lights
