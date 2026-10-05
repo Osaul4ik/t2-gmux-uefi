@@ -91,7 +91,7 @@ Attach to one chat with Claude:
 
 - the EDID files (`edid_*.bin`);
 - the ACPI tables (`dsdt.dat`, `ssdt*.dat`);
-- the **project archive** `t2-gmux-uefi-igfx.zip` (it contains `tools/`, `docs/ACPI_PATCH_GUIDE.md` and
+- the **project archive** `t2-gmux-uefi-main.zip` (it contains `tools/`, `docs/ACPI_PATCH_GUIDE.md` and
   `docs/VBT_GUIDE.md`, the instructions Claude follows);
 - `docs/ACPI_PATCH_GUIDE.md` and `docs/VBT_GUIDE.md` again as separate files, so they are certainly read.
 
