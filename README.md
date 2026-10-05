@@ -4,6 +4,15 @@ A small UEFI loader for the **MacBook Pro 2019 with the T2 chip** (Intel iGPU + 
 before Windows (Boot Camp) and lets you choose which GPU Windows will use: the AMD Radeon as usual, or
 the Intel integrated graphics (iGPU).
 
+
+## ☕ Support
+
+If you find this project useful, consider buying me a coffee!
+
+[![Ko-fi](https://img.shields.io/badge/Support%20me%20on-Ko--fi-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/osaul4ik)
+
+
+
 ## What it does
 
 When the Mac starts, the loader shows a menu with four modes. You pick one (or it picks the default after
