@@ -77,8 +77,8 @@ Windows has no built-in tool for this. Download the ACPICA Windows binary tools 
 acpidump.exe -b
 ```
 
-This writes every table as a binary file: `dsdt.dat`, `ssdt1.dat`, `ssdt2.dat`, ... Take **all** of them
-(the one that matters is the table named `SaSsdt`, Claude finds it). Do not disassemble or edit them.
+This writes every table as a binary file: `dsdt.dat`, `ssdt1.dat`, `ssdt2.dat`, ... Take **all** of them.
+Do not disassemble or edit.
 
 The download page describes the ASL compiler / disassembler (`iasl`); check that `acpidump.exe` is really
 in the zip. If it is not, take the dump on Linux (a live USB is enough): the files are in
