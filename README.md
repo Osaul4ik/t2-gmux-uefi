@@ -42,7 +42,7 @@ How to get the files: see **Install** below (Claude makes them from your EDID an
 The loader is already built: take the ready `bootx64.efi` (from the project's releases / the build
 artifact of the GitHub Actions run). You do not need to build it.
 
-Modes **1** and **2** need nothing else, go straight to step 4. Modes **3** and **4** need patch files
+Modes **1** and **2** need nothing else, go straight to step 4 (and skip step 6). Modes **3** and **4** need patch files
 made for **your** Mac (`SSDT_IGPU*.aml`, `t2gmux_vbt.bin`). Claude makes them from the data you collect in
 steps 1-3.
 
@@ -59,8 +59,9 @@ It writes `edid_1.bin`, `edid_2.bin`, ... Keep all of them: Claude picks the int
 
 ### 2. Collect the ACPI tables: DSDT and all SSDT (Windows)
 
-Windows has no built-in tool for this. Download the ACPICA tools for Windows (acpica.org) and run in
-PowerShell or cmd, in an empty folder:
+Windows has no built-in tool for this. Download the ACPICA Windows binary tools from Intel:
+[ACPI Component Architecture Downloads (Windows Binary Tools)](https://www.intel.com/content/www/us/en/download/774881/acpi-component-architecture-downloads-windows-binary-tools.html)
+(zip, e.g. `iasl-win-20260408.zip`), unpack it and run in PowerShell or cmd, in an empty folder:
 
 ```
 acpidump.exe -b
@@ -69,7 +70,9 @@ acpidump.exe -b
 This writes every table as a binary file: `dsdt.dat`, `ssdt1.dat`, `ssdt2.dat`, ... Take **all** of them
 (the one that matters is the table named `SaSsdt`, Claude finds it). Do not disassemble or edit them.
 
-On Linux the same files are in `/sys/firmware/acpi/tables/` (`DSDT`, `SSDT*`, as root); see
+The download page describes the ASL compiler / disassembler (`iasl`); check that `acpidump.exe` is really
+in the zip. If it is not, take the dump on Linux (a live USB is enough): the files are in
+`/sys/firmware/acpi/tables/` (`DSDT`, `SSDT*`, copy as root), see
 [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md), section 4.
 
 ### 3. Send everything to Claude
@@ -96,23 +99,56 @@ Show what you compiled and checked, and which ACPI paths you confirmed in my dum
 ```
 
 Claude returns the files for the chosen mode. They are built from your dumps and were not run on
-hardware, so test them (step 5) and report the result back to Claude if the panel stays dark.
+hardware, so test them (step 6) and report the result back to Claude if the panel stays dark.
 
-### 4. Put the loader on the EFI partition
+### 4. Open the EFI partition
+
+All files go to the **EFI partition** (ESP) of the Mac's internal disk, the one Windows boots from.
+
+- **From Windows** (PowerShell or cmd as Administrator):
+  ```
+  mountvol S: /S
+  ```
+  The EFI partition is now drive `S:`. When you are done: `mountvol S: /D`.
+- **From macOS** (Terminal):
+  ```
+  diskutil list                      # find the partition of type EFI on the internal disk, usually disk0s1
+  sudo diskutil mount disk0s1        # it appears as /Volumes/EFI
+  ```
+
+### 5. Put the loader on the EFI partition
 
 1. Set **Secure Boot = No Security** (macOS recovery, Startup Security Utility).
-2. On the EFI partition rename `/EFI/Boot/bootx64.efi` to `bootx64_original.efi`.
-3. Copy the ready `bootx64.efi` to `/EFI/Boot/`.
+2. In `EFI/Boot/` rename `bootx64.efi` to `bootx64_original.efi`.
+3. Copy the ready `bootx64.efi` to `EFI/Boot/`.
 
-### 5. Put the patch files for your mode in the EFI partition root
+### 6. Put the files made by Claude on the EFI partition
 
-| Mode | Copy to the root |
-|------|------------------|
+The files made by Claude go to the **root** of the EFI partition (`S:\` or `/Volumes/EFI/`), **not** into
+`EFI/Boot/`:
+
+| Mode | Copy to the root of the EFI partition |
+|------|----------------------------------------|
 | 3 | `SSDT_IGPU_VBT.aml` |
 | 4 | `SSDT_IGPU.aml` and `t2gmux_vbt.bin` |
 
-Restart and pick the mode in the loader menu. A mode with missing files will refuse to start and show
-which file is missing.
+Names must match exactly. The result:
+
+```
+EFI partition
+├── EFI
+│   └── Boot
+│       ├── bootx64.efi             <- the loader
+│       └── bootx64_original.efi    <- the original Windows boot loader
+├── SSDT_IGPU_VBT.aml               <- mode 3
+├── SSDT_IGPU.aml                   <- mode 4
+├── t2gmux_vbt.bin                  <- mode 4
+└── t2gmux_default.txt              <- created by the loader (key X)
+```
+
+Only the files of the mode you use are needed. Restart and pick the mode in the loader menu. A mode with
+missing files refuses to start and shows which file is missing. To replace a file later (a new build from
+Claude), just overwrite it.
 
 Building the loader yourself is optional (needs Docker):
 
