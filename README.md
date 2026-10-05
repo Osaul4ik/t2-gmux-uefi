@@ -52,7 +52,7 @@ steps 1-3.
 Run in PowerShell:
 
 ```
-powershell -ExecutionPolicy Bypass -File .\tools\get_edid.ps1
+powershell -ExecutionPolicy Bypass -File .\get_edid.ps1
 ```
 
 It writes `edid_1.bin`, `edid_2.bin`, ... Keep all of them: Claude picks the internal panel (manufacturer
