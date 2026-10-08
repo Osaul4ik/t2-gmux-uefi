@@ -435,6 +435,8 @@ DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruc
 //  |   [2] Boot + Apple_set_os ...                                        |
 //  |   [3] Integrated gfx ...                                             |
 //  |   [4] Integrated gfx + separate VBT ...                              |
+//  |   *************                (separator, never selectable)         |
+//  |   [5] Integrated gfx, Radeon stays ON ...                            |
 //  +----------------------------------------------------------------------+
 //  | Auto-boot in N s ...                                                 |
 //  | Up/Down + Enter ...                                                  |
@@ -454,8 +456,11 @@ DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruc
 #define ROW_STATUS      3
 #define ROW_SEP1        4
 #define ROW_MENU_HDR    5
-#define MENU_ROW        6       // MODE_COUNT rows: 6..(6+MODE_COUNT-1)
-#define ROW_SEP2        (MENU_ROW + MODE_COUNT)
+#define MENU_ROW        6       // MENU_ROWS rows: 6..(6+MENU_ROWS-1)
+#define MENU_ROWS       (MODE_COUNT + 1)    // modes + the separator row
+#define MENU_SEP_ROW    (MENU_ROW + (UINTN)MODE_INTEL_DGPU_ON)   // between mode 4 and mode 5
+#define MENU_SEP_TEXT   L"*************"
+#define ROW_SEP2        (MENU_ROW + MENU_ROWS)
 #define TIMER_ROW       (ROW_SEP2 + 1)
 #define HINT_ROW        (ROW_SEP2 + 2)
 #define ROW_SEP3        (ROW_SEP2 + 3)
@@ -488,14 +493,24 @@ typedef enum {
     MODE_RADEON_INTEL,          // 2: Boot + Apple_set_os (standard boot + apple_set_os patch)
     MODE_MUX_LANES_PATCH,       // 3: Integrated gfx (AppleSetOs + mux + Radeon OFF + DDI A 4 lanes + ACPI patch, no VBT)
     MODE_INTEL,                 // 4: Integrated gfx + separate VBT (3 + VBT injection from file + EDID from dGPU)
+    MODE_INTEL_DGPU_ON,         // 5: copy of 4, but the Radeon rail stays ON; ACPI patch = brightness only (no sleep fix)
     MODE_COUNT
 } BOOT_MODE;
+
+// The separator row ("*************") sits between mode 4 and mode 5. It is not a mode, so
+// Up/Down (which walk over modes only) can never land on it. Row of a mode in the frame:
+static UINTN
+MenuRowOf(BOOT_MODE M)
+{
+    return MENU_ROW + (UINTN)M + ((M >= MODE_INTEL_DGPU_ON) ? 1 : 0);
+}
 
 static CHAR16 *MenuText[MODE_COUNT] = {
     L"[1] Standard Boot: clean boot without AppleSetOs or patches",
     L"[2] Boot + Apple_set_os: standard boot + apple_set_os patch",
     L"[3] Integrated gfx: iGPU via gmux + Radeon OFF + full ACPI+VBT",
     L"[4] Integrated gfx + built-in VBT: ACPI + VBT from panel",
+    L"[5] Integrated gfx + built-in VBT, Radeon ON: brightness ACPI",
 };
 
 static CHAR16 *MenuName[MODE_COUNT] = {
@@ -503,14 +518,15 @@ static CHAR16 *MenuName[MODE_COUNT] = {
     L"2 - Boot + Apple_set_os",
     L"3 - Integrated gfx",
     L"4 - Integrated gfx + separate VBT",
+    L"5 - Integrated gfx + built-in VBT, Radeon ON",
 };
 
 // Default mode (the one with the x mark, started by the auto-boot timer) is kept in a
-// one-character file in the root of the ESP (1..4); key X in the menu rewrites it.
+// one-character file in the root of the ESP (1..5); key X in the menu rewrites it.
 // The old letters of earlier versions (D, A, H, I) are still read from that file.
 #define DEFAULT_FILE    L"\\t2gmux_default.txt"
-static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'3', L'4' };
-static const CHAR16 ModeLegacy[MODE_COUNT] = { L'D', L'A', L'H', L'I' };   // old default-file letters
+static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'3', L'4', L'5' };
+static const CHAR16 ModeLegacy[MODE_COUNT] = { L'D', L'A', L'H', L'I', L'5' };   // old default-file letters (5 never had one)
 
 static BOOT_MODE
 DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image)
@@ -552,9 +568,11 @@ DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode)
 // ---- required files per mode ----
 // 3 = full ACPI patch with the VBT inside the SSDT: needs \SSDT_IGPU_VBT.aml.
 // 4 = ACPI patch without VBT + built-in VBT completed from the panel and injected from UEFI: needs \SSDT_IGPU.aml.
+// 5 = same as 4 (Radeon stays ON), but with its own brightness-only SSDT: needs \SSDT_IGPU_BRT.aml.
 // A mode whose files are missing cannot be chosen: the menu stays and shows a message.
 #define ACPI_FILE_FULL  L"\\SSDT_IGPU_VBT.aml"      // mode 3
 #define ACPI_FILE_BASE  L"\\SSDT_IGPU.aml"          // mode 4
+#define ACPI_FILE_BRT   L"\\SSDT_IGPU_BRT.aml"      // mode 5 (brightness only, no sleep fix)
 
 static BOOLEAN
 EspFileExists(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, const CHAR16 *Name)
@@ -584,6 +602,11 @@ ModeAvailable(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, const CHA
         // (DPCD / EDID over the iGPU's AUX channel).
         if (!EspFileExists(BS, Image, ACPI_FILE_BASE)) {
             *Msg = L"mode 4 unavailable: SSDT_IGPU.aml not found";
+            return FALSE;
+        }
+    } else if (Mode == MODE_INTEL_DGPU_ON) {
+        if (!EspFileExists(BS, Image, ACPI_FILE_BRT)) {
+            *Msg = L"mode 5 unavailable: SSDT_IGPU_BRT.aml not found";
             return FALSE;
         }
     }
@@ -656,7 +679,7 @@ UiDrawFrame(_INT_SimpleTextGraphicsStruct *gs)
     UiBlank(gs, ROW_STATUS);
     UiRule(gs, ROW_SEP1, L'-');
     UiBlank(gs, ROW_MENU_HDR);
-    for (UINTN m = 0; m < MODE_COUNT; m++)
+    for (UINTN m = 0; m < MENU_ROWS; m++)
         UiBlank(gs, MENU_ROW + m);
     UiRule(gs, ROW_SEP2, L'-');
     UiBlank(gs, TIMER_ROW);
@@ -680,16 +703,18 @@ static VOID
 MenuDraw(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel, BOOT_MODE Def)
 {
     for (UINTN m = 0; m < MODE_COUNT; m++) {
-        UI_PRINT(gs, MENU_ROW + m, L"%s%s %s", (m == (UINTN)Sel) ? L">" : L" ",
+        UI_PRINT(gs, MenuRowOf((BOOT_MODE)m), L"%s%s %s", (m == (UINTN)Sel) ? L">" : L" ",
                  (m == (UINTN)Def) ? L"x" : L" ", MenuText[m]);
     }
+    // separator: plain text, no marker, never highlighted (Sel is always a mode)
+    UI_PRINT(gs, MENU_SEP_ROW, L"   " MENU_SEP_TEXT);
 }
 
 // Full redraw, then the selected row is repainted inverted (inside the border).
 static VOID
 MenuRefresh(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel)
 {
-    UINTN Row = MENU_ROW + (UINTN)Sel;
+    UINTN Row = MenuRowOf(Sel);
 
     gs->ConOut->SetAttribute(gs->ConOut, 0x07);
     _INT_SimpleTextGraphicsRefresh(gs);
@@ -876,11 +901,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     //       (SSDT_IGPU_VBT.aml, the VBT is inside the SSDT); no VBT injection from UEFI, no files
     //   4 = Integrated gfx + built-in VBT: as 3 but with SSDT_IGPU.aml (no VBT inside) + inject
     //       the built-in VBT from UEFI (link from panel DPCD, timing from EDID)
-    BOOLEAN DoSetOs = FALSE;   // 2 / 3 / 4: load AppleSetOs (the iGPU becomes visible)
-    BOOLEAN DoSwitch = FALSE;  // 3 / 4: mux->iGPU + DDI A 4 lanes (+ VBT / ACPI patch, see below)
-    BOOLEAN DoRailOff = FALSE; // 3 / 4: additionally Radeon rail OFF
-    BOOLEAN DoVbt = FALSE;     // 4: VBT injection + EDID from the dGPU (3 skips it)
-    BOOLEAN DoAcpi = FALSE;    // 3 / 4: ACPI patch inside the switch block
+    //   5 = copy of 4, but the Radeon rail stays ON, and the ACPI patch is SSDT_IGPU_BRT.aml:
+    //       brightness (_BCM) only - no _PTS / _WAK, so sleep is left exactly as the firmware has it
+    BOOLEAN DoSetOs = FALSE;   // 2 / 3 / 4 / 5: load AppleSetOs (the iGPU becomes visible)
+    BOOLEAN DoSwitch = FALSE;  // 3 / 4 / 5: mux->iGPU + DDI A 4 lanes (+ VBT / ACPI patch, see below)
+    BOOLEAN DoRailOff = FALSE; // 3 / 4: additionally Radeon rail OFF (5 leaves it ON)
+    BOOLEAN DoVbt = FALSE;     // 4 / 5: VBT injection + EDID from the dGPU (3 skips it)
+    BOOLEAN DoAcpi = FALSE;    // 3 / 4 / 5: ACPI patch inside the switch block
+    CHAR16 *AcpiFile = NULL;   // SSDT file of the chosen mode (set below)
     BOOLEAN DoDump = FALSE;    // dump / log files (no menu mode sets it any more)
 
 
@@ -938,7 +966,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     UI_STATUS(&gs, L"bootx64_original.efi ready");
 
     // ---- boot mode menu ----
-    // Up/Down = move, Enter/Space = confirm, 1..4 = pick and confirm at once (old letters D/A/H/I still work),
+    // Up/Down = move (over modes only, the separator is skipped), Enter/Space = confirm,
+    // 1..5 = pick and confirm at once (old letters D/A/H/I still work for 1..4),
     // X = save the highlighted mode as the default (marked x). Any key stops the auto-boot
     // timer; if no key is pressed for COUNTDOWN_SECS the default mode is started.
     BOOT_MODE Def = DefaultLoad(BS, ImageHandle);
@@ -1009,6 +1038,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 Sel = MODE_MUX_LANES_PATCH; Want = TRUE;
             } else if (c == L'4' || c == L'i' || c == L'I') {
                 Sel = MODE_INTEL; Want = TRUE;
+            } else if (c == L'5') {
+                Sel = MODE_INTEL_DGPU_ON; Want = TRUE;
             } else {
                 TimerOn = FALSE;                       // any other key just stops the timer
             }
@@ -1044,6 +1075,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         DoSwitch = TRUE;
         DoRailOff = TRUE;
         DoAcpi = TRUE;                                 // no DoVbt
+        AcpiFile = ACPI_FILE_FULL;
         break;
     case MODE_INTEL:
         DoSetOs = TRUE;
@@ -1051,6 +1083,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         DoRailOff = TRUE;
         DoVbt = TRUE;
         DoAcpi = TRUE;
+        AcpiFile = ACPI_FILE_BASE;
+        break;
+    case MODE_INTEL_DGPU_ON:
+        DoSetOs = TRUE;                                // as 4 ...
+        DoSwitch = TRUE;
+        DoVbt = TRUE;
+        DoAcpi = TRUE;
+        AcpiFile = ACPI_FILE_BRT;                      // ... brightness-only SSDT
+        // DoRailOff stays FALSE: the Radeon is not switched off
         break;
     default:
         break;                                         // MODE_RADEON: nothing is touched
@@ -1132,7 +1173,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     if (AppleSetOsHandleBuf != NULL)
         _INT_FreePool(BS, AppleSetOsHandleBuf);
 
-    // ---- modes 3 / 4: gmux panel switch, dGPU rail OFF, (4: VBT inject) ----
+    // ---- modes 3 / 4 / 5: gmux panel switch, (3 / 4: dGPU rail OFF), (4 / 5: VBT inject) ----
     // Never power the dGPU rail back on from Windows after OFF (known hang on this HW).
     if (DoSwitch) {
         GMUX_IRQ_SAVE IrqSave;
@@ -1220,10 +1261,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             else
                 LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
             // ACPI patch (brightness via gmux) from the ESP root: mode 3 = SSDT_IGPU_VBT.aml
-            // (VBT inside the SSDT), mode 4 = SSDT_IGPU.aml (VBT injected separately above).
+            // (VBT inside the SSDT), mode 4 = SSDT_IGPU.aml (VBT injected separately above),
+            // mode 5 = SSDT_IGPU_BRT.aml (brightness only, VBT injected separately above).
             if (DoAcpi)
-                AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle,
-                                         DoVbt ? ACPI_FILE_BASE : ACPI_FILE_FULL, &IR);
+                AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, AcpiFile, &IR);
             if (DoDump) {
                 MakeName(N1, BootTag, L"inject.txt");
                 _INT_WriteEspFile(BS, ImageHandle, N1, RBuf, IR.len);
@@ -1244,7 +1285,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             LOG(&gs, PR_DDI, L"DDI A 4 lanes: %s (%lX)", EFI_ERROR(LS) ? L"FAILED" : L"OK", LS);
         if (DoAcpi) {
             LOG(&gs, PR_ACPI, L"ACPI patch %s: %s (%lX)",
-                DoVbt ? L"SSDT_IGPU.aml" : L"SSDT_IGPU_VBT.aml",
+                AcpiFile + 1,                          // file name without the leading backslash
                 AS == EFI_NOT_FOUND ? L"not found, skipped" : (EFI_ERROR(AS) ? L"FAILED" : L"OK"), AS);
         } else {
             LOG(&gs, PR_ACPI, L"ACPI patch: skipped");

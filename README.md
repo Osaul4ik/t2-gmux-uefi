@@ -15,7 +15,8 @@ If you find this project useful, consider buying me a coffee!
 
 ## What it does
 
-When the Mac starts, the loader shows a menu with four modes. You pick one (or it picks the default after
+When the Mac starts, the loader shows a menu with five modes (a row of `*************` separates the
+first four from mode 5; it cannot be selected). You pick one (or it picks the default after
 5 seconds), the loader prepares the GPUs and then starts the normal Windows boot loader.
 
 | Key | Mode | What it does |
@@ -24,6 +25,8 @@ When the Mac starts, the loader shows a menu with four modes. You pick one (or i
 | **2** | Boot + Apple_set_os | Standard boot + the apple_set_os patch. Windows sees both GPUs (Radeon and Intel HD). |
 | **3** | Integrated gfx (**recommended**) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT (panel data) is inside the ACPI patch. |
 | **4** | Integrated gfx + built-in VBT | Same as 3, but the VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
+| | `*************` | separator, not selectable |
+| **5** | Integrated gfx + built-in VBT, Radeon ON | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate, brightness-only file: no sleep fix, sleep is left as the firmware has it. |
 
 Modes 3 and 4 both move Windows to the Intel iGPU, but they behave differently after a graphics driver
 restart (see **What to expect**). **Mode 3 is recommended.** Mode 4 needs no hand-made VBT: the iGPU
@@ -36,6 +39,7 @@ asks the panel what it supports.
 | 1, 2 | nothing |
 | 3 | `SSDT_IGPU_VBT.aml` |
 | 4 | `SSDT_IGPU.aml` |
+| 5 | `SSDT_IGPU_BRT.aml` |
 
 If a file is missing, that mode cannot be started: the menu stays, the timer stops and the status line
 says which file is missing.
@@ -46,14 +50,16 @@ How to get the files: see **Install** below (Claude makes them from your EDID an
   Mode 4 needs no VBT file: the loader reads the same data from the panel itself (DPCD + EDID over AUX-A).
 - `SSDT_IGPU.aml` / `SSDT_IGPU_VBT.aml` (brightness, sleep, optional VBT):
   [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md).
+- `SSDT_IGPU_BRT.aml` (mode 5, brightness only, no sleep fix):
+  [docs/ACPI_PATCH_GUIDE_MODE5.md](docs/ACPI_PATCH_GUIDE_MODE5.md).
 
 ## Install
 
 The loader is already built: take the ready `bootx64.efi` (from the project's releases / the build
 artifact of the GitHub Actions run). You do not need to build it.
 
-Modes **1** and **2** need nothing else, go straight to step 4 (and skip step 6). Modes **3** and **4** need patch files
-made for **your** Mac (`SSDT_IGPU*.aml`, `t2gmux_vbt.bin`). Claude makes them from the data you collect in
+Modes **1** and **2** need nothing else, go straight to step 4 (and skip step 6). Modes **3**, **4** and **5** need patch files
+made for **your** Mac (`SSDT_IGPU*.aml`, `t2gmux_vbt.bin` for mode 3 only). Claude makes them from the data you collect in
 steps 1-3.
 
 ### 1. Collect the panel EDID (Windows, Boot Camp)
@@ -91,12 +97,14 @@ Attach to one chat with Claude:
 
 - the EDID files (`edid_*.bin`);
 - the ACPI tables (`dsdt.dat`, `ssdt*.dat`);
-- the **project archive** `t2-gmux-uefi-main.zip` (it contains `tools/`, `docs/ACPI_PATCH_GUIDE.md` and
-  `docs/VBT_GUIDE.md`, the instructions Claude follows);
-- `docs/ACPI_PATCH_GUIDE.md` and `docs/VBT_GUIDE.md` again as separate files, so they are certainly read.
+- the **project archive** `t2-gmux-uefi-main.zip` (it contains `tools/`, `docs/ACPI_PATCH_GUIDE.md`,
+  `docs/ACPI_PATCH_GUIDE_MODE5.md` and `docs/VBT_GUIDE.md`, the instructions Claude follows);
+- `docs/ACPI_PATCH_GUIDE.md` (modes 3 / 4), `docs/ACPI_PATCH_GUIDE_MODE5.md` (mode 5) and
+  `docs/VBT_GUIDE.md` again as separate files, so they are certainly read.
 
-Check before sending: the archive must contain `tools/SSDT_IGPU.asl`, `tools/make_ssdt_igpu.py`,
-`tools/make_vbt.py` and a **non-empty** `tools/template/coreboot_google_sarien_data.vbt`.
+Check before sending: the archive must contain `tools/SSDT_IGPU.asl`, `tools/SSDT_IGPU_BRT.asl`,
+`tools/make_ssdt_igpu.py`, `tools/make_vbt.py` and a **non-empty**
+`tools/template/coreboot_google_sarien_data.vbt` (the last two are only needed for modes 3 / 4).
 
 Message to Claude (copy, change the mode):
 
@@ -106,6 +114,15 @@ Follow docs/ACPI_PATCH_GUIDE.md and docs/VBT_GUIDE.md from the project archive s
 Attached: panel EDID (edid_*.bin), DSDT and SSDT dumps (*.dat), the project archive.
 Give me the ready files: SSDT_IGPU.aml (mode 4) and/or SSDT_IGPU_VBT.aml (mode 3, built with t2gmux_vbt.bin).
 Show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
+```
+
+For **mode 5** use this message instead (it needs no EDID and no VBT):
+
+```
+Make SSDT_IGPU_BRT.aml for my MacBook Pro (T2) for mode 5.
+Follow docs/ACPI_PATCH_GUIDE_MODE5.md from the project archive step by step.
+Attached: DSDT and SSDT dumps (*.dat), the project archive.
+Brightness only, no sleep fix. Show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
 ```
 
 Claude returns the files for the chosen mode. They are built from your dumps and were not run on
@@ -141,6 +158,7 @@ The files made by Claude go to the **root** of the EFI partition (`S:\` or `/Vol
 |------|----------------------------------------|
 | 3 | `SSDT_IGPU_VBT.aml` |
 | 4 | `SSDT_IGPU.aml` |
+| 5 | `SSDT_IGPU_BRT.aml` |
 
 Names must match exactly. The result:
 
@@ -152,6 +170,7 @@ EFI partition
 │       └── bootx64_original.efi    <- the original Windows boot loader
 ├── SSDT_IGPU_VBT.aml               <- mode 3
 ├── SSDT_IGPU.aml                   <- mode 4
+├── SSDT_IGPU_BRT.aml               <- mode 5
 └── t2gmux_default.txt              <- created by the loader (key X)
 ```
 
@@ -173,7 +192,8 @@ Intel control panel: http://www.microsoft.com/store/apps/9PLFNLNT3G5G
 
 ## Use
 
-- **Up / Down + Enter** (or Space) starts the highlighted mode. Pressing **1**-**4** starts that mode at once.
+- **Up / Down + Enter** (or Space) starts the highlighted mode. The `*************` separator is skipped:
+  the highlight only moves over modes. Pressing **1**-**5** starts that mode at once.
 - If you press nothing for 5 seconds, the **default** mode starts. Any key stops the timer.
 - The default mode is marked with an **x**. Press **X** to make the highlighted mode the default (it is
   saved in `t2gmux_default.txt` on the EFI partition; delete the file to go back to mode 4). X only saves,
@@ -188,12 +208,18 @@ Intel control panel: http://www.microsoft.com/store/apps/9PLFNLNT3G5G
   **Win + Ctrl + Shift + B**.
 - **Mode 4:** after **Win + Ctrl + Shift + B** (graphics driver restart) the screen goes **black**. Do not
   use that shortcut in mode 4; restart the Mac to get the picture back.
+- **Mode 5:** the Radeon stays on, only the panel is moved to the iGPU. This mode is new and has not been
+  tested on hardware; until it has, avoid **Win + Ctrl + Shift + B** as in mode 4. Its ACPI patch has no
+  sleep fix, so after sleep the panel may stay dark (the firmware re-routes gmux on resume, see
+  [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md), section 5.2): restart instead of sleeping if that happens.
 
 ## Warnings
 
 - After modes **3** / **4** switch the Radeon off, do **not** power it back on from Windows.
 - Do not use `SSDT_IGPU_VBT.aml` under the name `SSDT_IGPU.aml` (or the other way round). In mode 4 it
   would overwrite the VBT the loader injects.
+- Do not use `SSDT_IGPU.aml` under the name `SSDT_IGPU_BRT.aml`: it contains the sleep patch that mode 5
+  must not have.
 - If the screen is dark, restart the Mac and choose mode **1** (hold the key or press 1 at the menu) to
   boot normally on the Radeon.
 
@@ -205,7 +231,8 @@ loader only writes one file, `t2gmux_default.txt`.
 ## More
 
 - [docs/VBT_GUIDE.md](docs/VBT_GUIDE.md): how to make `t2gmux_vbt.bin`
-- [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md): how to make the SSDT files
+- [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md): how to make the SSDT files of modes 3 and 4
+- [docs/ACPI_PATCH_GUIDE_MODE5.md](docs/ACPI_PATCH_GUIDE_MODE5.md): how to make `SSDT_IGPU_BRT.aml` (mode 5)
 - [docs/TECHNICAL.md](docs/TECHNICAL.md): what the loader does internally (gmux switching, ACPI patch, EDID, lanes)
 
 ## Credits

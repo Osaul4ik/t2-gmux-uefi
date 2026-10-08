@@ -20,6 +20,14 @@ later failure the renames are reverted. The result is shown on screen. The GPU d
 What the SSDT contains (brightness, sleep, optional VBT) and how to rebuild it:
 [ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md). The `.asl` source and the generator are in `tools/`.
 
+### Mode 5: brightness-only patch
+
+Mode 5 applies the same mechanism with its own file, `\SSDT_IGPU_BRT.aml` (source
+`tools/SSDT_IGPU_BRT.asl`, procedure [ACPI_PATCH_GUIDE_MODE5.md](ACPI_PATCH_GUIDE_MODE5.md)). The file defines
+only the new `_BCM`. It does not contain the names `XWAK` / `XPTS`, so the loader renames nothing in the
+DSDT: the only change to the firmware tables is `_BCM` -> `XBCM` in `SaSsdt`, plus the appended SSDT.
+Sleep / resume stays as the firmware has it.
+
 ## Panel data from the dGPU (EDID substitution, mode 4)
 
 Apple's EFI publishes panel data only for the Radeon (its GOP handle carries the EDID protocol);
@@ -40,7 +48,7 @@ file, because the firmware does not publish them.
 (port 0x74, driven through ACPI `_BCM`, see the SSDT patch above), not by an Intel PWM, so the
 Intel driver must not claim a PWM it cannot use.
 
-## What the mux/rail modes do (3, 4)
+## What the mux/rail modes do (3, 4; mode 5 without the rail step)
 
 Sequence follows Linux `apple-gmux` (T2 MMIO gmux):
 
@@ -53,12 +61,15 @@ Sequence follows Linux `apple-gmux` (T2 MMIO gmux):
    shows, a fixed 250 ms delay is used
 5. status is cleared and the original mask is restored
 
+Mode 5 runs steps 1, 2 and 5 only: the panel is moved to the iGPU, but the rail step (3, 4) is never
+issued and the Radeon stays powered.
+
 Not done (cannot be done from Boot Services): ACPI `GMSP(0)` that Linux calls
 when clearing MMIO-gmux interrupts, and the eDP link pre-calibration that
 `vga_switcheroo` flags as `NEEDS_EDP_CONFIG` for T2 gmux (the iGPU has to train
 the panel link itself, hence the VBT injection).
 
-## VBT injection and DDI A 4 lanes (modes 3, 4)
+## VBT injection and DDI A 4 lanes (modes 3, 4, 5)
 
 Apple's T2 firmware leaves the Intel OpRegion VBT mailbox empty, so the Windows Intel driver does
 not know an eDP panel sits on DDI A.
@@ -68,7 +79,8 @@ Mode 4 needs no VBT file. The loader carries a VBT built from a real coreboot Wh
 from the panel (see the live eDP probe section below) and copies it into OpRegion+0x400, then re-reads it.
 Copy `SSDT_IGPU.aml` to the ESP root and press **4** at the countdown.
 
-(Mode 3 delivers the VBT through ACPI instead: `SSDT_IGPU_VBT.aml`, see the guide.)
+(Mode 3 delivers the VBT through ACPI instead: `SSDT_IGPU_VBT.aml`, see the guide. Mode 5 uses the same
+UEFI route as mode 4, with `SSDT_IGPU_BRT.aml`.)
 
 Modes **3** and **4** also set `DDI_BUF_CTL(A).DDI_A_4_LANES` (bit 4, GTTMMADR+0x64000) in the iGPU. On
 gen < 11 i915 takes the DDI A lane limit from that bit, Apple's firmware sets it only when it lights

@@ -27,7 +27,7 @@ machine's own ACPI dump (section 8).
 
 ## 1. Boot modes and the files they need
 
-The loader menu has four modes:
+The loader menu has five modes (mode 5 has its own guide, see the note below the table):
 
 | Key | Mode | ACPI patch file (ESP root) | VBT |
 |-----|------|----------------------------|-----|
@@ -35,6 +35,11 @@ The loader menu has four modes:
 | **2** | Boot + Apple_set_os | none | none |
 | **3** | Integrated gfx | `\SSDT_IGPU_VBT.aml` | inside the SSDT (built with `--vbt`) |
 | **4** | Integrated gfx + built-in VBT | `\SSDT_IGPU.aml` | built into the loader, completed from the panel (DPCD / EDID), injected from UEFI; no file |
+| **5** | Integrated gfx + built-in VBT, Radeon ON | `\SSDT_IGPU_BRT.aml` | as mode 4 |
+
+Mode **5** is mode 4 with the Radeon left ON and a brightness-only SSDT (no sleep fix). Its patch file is
+built from `tools/SSDT_IGPU_BRT.asl` and has its own procedure: [ACPI_PATCH_GUIDE_MODE5.md](ACPI_PATCH_GUIDE_MODE5.md).
+Everything below in this file is about modes 3 and 4.
 
 A mode whose files are missing cannot be started. The menu stays, the timer stops and the status line
 names the missing file (for mode 3 `SSDT_IGPU_VBT.aml`; for mode 4 `SSDT_IGPU.aml`). This also applies to the auto-boot default.
@@ -257,6 +262,8 @@ confirming what the machine actually has.
 - A 0-byte VBT template makes `make_vbt.py` fail. Fix the template, do not work around it.
 - In `sh -c`, process substitution (`<(...)`) is a syntax error. Use `bash -c` for such commands.
 - Do not write `iasl` output files into `tools/`.
+- Do not use `SSDT_IGPU.aml` as `SSDT_IGPU_BRT.aml` (mode 5): it carries the sleep patch and the gmux MMIO
+  window, which mode 5 must not have.
 - Mixing up the two SSDT files: `SSDT_IGPU_VBT.aml` renamed to `SSDT_IGPU.aml` makes mode 4 overwrite
   the injected VBT; `SSDT_IGPU.aml` used as `SSDT_IGPU_VBT.aml` makes mode 3 start with an empty VBT
   mailbox and the panel may stay dark. Check for `_INI` as in section 7.

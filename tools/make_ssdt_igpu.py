@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build SSDT_IGPU.aml (mode 4) or SSDT_IGPU_VBT.aml (mode 3) from tools/SSDT_IGPU.asl.
+"""Build SSDT_IGPU.aml (mode 4), SSDT_IGPU_VBT.aml (mode 3) or SSDT_IGPU_BRT.aml (mode 5).
 
   python tools/make_ssdt_igpu.py                       -o SSDT_IGPU.aml       (no VBT inside, mode 4)
   python tools/make_ssdt_igpu.py --vbt t2gmux_vbt.bin  -o SSDT_IGPU_VBT.aml   (VBT inside, mode 3)
+  python tools/make_ssdt_igpu.py --asl tools/SSDT_IGPU_BRT.asl -o SSDT_IGPU_BRT.aml   (brightness only, mode 5)
 
 The .asl is only read, never written. The two markers /*VBT_EXTERNALS*/ and /*VBT_BLOCK*/ must be
 in it. Needs `iasl` (apt-get install acpica-tools).
@@ -113,7 +114,7 @@ def main():
         print("VBT: %d bytes, T2VB buffer 0x%X (%d) bytes" % (len(vbt), n, n))
     else:
         ext, blk = "", ""
-        print("no VBT embedded (mode 4 build)")
+        print("no VBT embedded (plain build: mode 4 / mode 5)")
     out_asl = src.replace(MARK_EXT, ext).replace(MARK_BLK, blk)
 
     out = os.path.abspath(a.output)
