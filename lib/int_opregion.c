@@ -762,8 +762,14 @@ EFI_STATUS _INT_VbtApplyDpcd(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
     if (!v) return EFI_NOT_FOUND;
     if (!C->Valid) { S("VBT link: no DPCD data, built-in defaults kept"); NL(); return EFI_NOT_READY; }
     UINTN vsz = _INT_Rd16(v + 24);
+    // PSR stays off even when the panel reports it (DPCD 0x070): with PSR the Intel
+    // driver makes the T2 panel flicker.
+    if (C->PsrSupport) {
+        S("VBT link: panel reports PSR (DPCD 0x070 = "); DC(C->PsrSupport);
+        S("), keeping it disabled in the VBT"); NL();
+    }
     if (!_INT_VbtSetLink(v, vsz < room ? vsz : room, C->VbtRate, C->VbtLanes,
-                         C->PsrSupport != 0, R)) {
+                         FALSE, R)) {
         S("VBT link: patch failed (unexpected VBT layout)"); NL();
         return EFI_COMPROMISED_DATA;
     }
