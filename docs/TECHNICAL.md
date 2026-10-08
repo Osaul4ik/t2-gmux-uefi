@@ -28,6 +28,23 @@ only the new `_BCM`. It does not contain the names `XWAK` / `XPTS`, so the loade
 DSDT: the only change to the firmware tables is `_BCM` -> `XBCM` in `SaSsdt`, plus the appended SSDT.
 Sleep / resume stays as the firmware has it.
 
+## Advanced Menu: gpu-power-prefs (NVRAM)
+
+Menu entry 6 is not a boot mode. It opens `AdvancedMenu()` in `bootx64.c`, which uses the runtime
+services (`GetVariable` / `SetVariable`) on the Apple variable `gpu-power-prefs`, vendor GUID
+`fa4ce28d-b62f-4c99-9cc3-6815686e30f9`, attributes `0x07` (non-volatile + boot services + runtime, as macOS
+writes it).
+
+- Switch to iGPU: `SetVariable` with the 4 bytes `01 00 00 00`.
+- Switch to dGPU: `SetVariable` with size 0, which deletes the variable (an already absent variable is not
+  an error).
+- Both are verified by reading the variable back; the status line shows the result.
+- Visibility: variable found (`EFI_SUCCESS` or `EFI_BUFFER_TOO_SMALL`) -> only Switch to dGPU; `EFI_NOT_FOUND`
+  -> only Switch to iGPU; any other read error -> both.
+
+The firmware reads the variable early at boot, so a change only applies after a restart. Nothing else is
+touched: no gmux access, no ACPI, no files. The Advanced Menu is never saved as the default mode.
+
 ## Panel data from the dGPU (EDID substitution, mode 4)
 
 Apple's EFI publishes panel data only for the Radeon (its GOP handle carries the EDID protocol);

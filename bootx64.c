@@ -437,6 +437,8 @@ DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruc
 //  |   [4] Integrated gfx + separate VBT ...                              |
 //  |   *************                (separator, never selectable)         |
 //  |   [5] Integrated gfx, Radeon stays ON ...                            |
+//  |   *************                (separator, never selectable)         |
+//  |   [6] Advanced Menu ...        (opens the GPU power preference menu) |
 //  +----------------------------------------------------------------------+
 //  | Auto-boot in N s ...                                                 |
 //  | Up/Down + Enter ...                                                  |
@@ -449,6 +451,7 @@ DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruc
 // used for progress output (no frame there).
 #define APP_TITLE       L"GMUX_Control v0.8"
 #define UI_W            72      // frame width in columns, including both border chars
+#define UI_HINT_MAIN    L"Up/Down + Enter, or the mode number. X = save selected as default (x)"
 
 #define ROW_TOP         0
 #define ROW_TITLE       1
@@ -457,8 +460,11 @@ DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruc
 #define ROW_SEP1        4
 #define ROW_MENU_HDR    5
 #define MENU_ROW        6       // MENU_ROWS rows: 6..(6+MENU_ROWS-1)
-#define MENU_ROWS       (MODE_COUNT + 1)    // modes + the separator row
+#define MENU_ADV        MODE_COUNT          // menu entry 6 (Advanced Menu): not a boot mode
+#define MENU_ITEMS      (MODE_COUNT + 1)    // boot modes + Advanced Menu: what Up/Down walk over
+#define MENU_ROWS       (MENU_ITEMS + 2)    // entries + the two separator rows
 #define MENU_SEP_ROW    (MENU_ROW + (UINTN)MODE_INTEL_DGPU_ON)   // between mode 4 and mode 5
+#define MENU_SEP2_ROW   (MENU_ROW + (UINTN)MODE_COUNT + 1)       // between mode 5 and Advanced Menu
 #define MENU_SEP_TEXT   L"*************"
 #define ROW_SEP2        (MENU_ROW + MENU_ROWS)
 #define TIMER_ROW       (ROW_SEP2 + 1)
@@ -497,20 +503,22 @@ typedef enum {
     MODE_COUNT
 } BOOT_MODE;
 
-// The separator row ("*************") sits between mode 4 and mode 5. It is not a mode, so
-// Up/Down (which walk over modes only) can never land on it. Row of a mode in the frame:
+// Two separator rows ("*************"): one between mode 4 and mode 5, one between mode 5 and
+// the Advanced Menu entry. They are not entries, so Up/Down (which walk over entries only)
+// can never land on them. Row of an entry in the frame:
 static UINTN
-MenuRowOf(BOOT_MODE M)
+MenuRowOf(UINTN M)
 {
-    return MENU_ROW + (UINTN)M + ((M >= MODE_INTEL_DGPU_ON) ? 1 : 0);
+    return MENU_ROW + M + ((M >= (UINTN)MODE_INTEL_DGPU_ON) ? 1 : 0) + ((M >= (UINTN)MENU_ADV) ? 1 : 0);
 }
 
-static CHAR16 *MenuText[MODE_COUNT] = {
+static CHAR16 *MenuText[MENU_ITEMS] = {
     L"[1] Standard Boot: clean boot without AppleSetOs or patches",
     L"[2] Boot + Apple_set_os: standard boot + apple_set_os patch",
     L"[3] Integrated gfx: iGPU via gmux + Radeon OFF + full ACPI+VBT",
     L"[4] Integrated gfx + built-in VBT: ACPI + VBT from panel",
     L"[5] Integrated gfx + built-in VBT, Radeon ON: brightness ACPI",
+    L"[6] Advanced Menu: switch GPU power preference (NVRAM)",
 };
 
 static CHAR16 *MenuName[MODE_COUNT] = {
@@ -695,27 +703,26 @@ UiDrawFrame(_INT_SimpleTextGraphicsStruct *gs)
     UiBorder(gs, ROW_TITLE);
 
     UI_PRINT(gs, ROW_MENU_HDR, L"Boot mode:");
-    UI_PRINT(gs, HINT_ROW, L"Up/Down + Enter, or the mode number. X = save selected as default (x)");
+    UI_PRINT(gs, HINT_ROW, UI_HINT_MAIN);
     UI_PRINT(gs, GPU_HDR_ROW, L"Graphics cards:");
 }
 
 static VOID
 MenuDraw(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel, BOOT_MODE Def)
 {
-    for (UINTN m = 0; m < MODE_COUNT; m++) {
-        UI_PRINT(gs, MenuRowOf((BOOT_MODE)m), L"%s%s %s", (m == (UINTN)Sel) ? L">" : L" ",
+    for (UINTN m = 0; m < MENU_ITEMS; m++) {
+        UI_PRINT(gs, MenuRowOf(m), L"%s%s %s", (m == (UINTN)Sel) ? L">" : L" ",
                  (m == (UINTN)Def) ? L"x" : L" ", MenuText[m]);
     }
-    // separator: plain text, no marker, never highlighted (Sel is always a mode)
+    // separators: plain text, no marker, never highlighted (Sel is always an entry)
     UI_PRINT(gs, MENU_SEP_ROW, L"   " MENU_SEP_TEXT);
+    UI_PRINT(gs, MENU_SEP2_ROW, L"   " MENU_SEP_TEXT);
 }
 
-// Full redraw, then the selected row is repainted inverted (inside the border).
+// Full redraw, then the given row is repainted inverted (inside the border).
 static VOID
-MenuRefresh(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel)
+UiRefreshHighlight(_INT_SimpleTextGraphicsStruct *gs, UINTN Row)
 {
-    UINTN Row = MenuRowOf(Sel);
-
     gs->ConOut->SetAttribute(gs->ConOut, 0x07);
     _INT_SimpleTextGraphicsRefresh(gs);
     if (gs->buf != NULL && Row < gs->row && gs->col >= UI_W) {
@@ -732,6 +739,176 @@ MenuRefresh(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel)
         gs->ConOut->SetAttribute(gs->ConOut, 0x07);
         gs->ConOut->SetCursorPosition(gs->ConOut, 0, 0);
     }
+}
+
+static VOID
+MenuRefresh(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel)
+{
+    UiRefreshHighlight(gs, MenuRowOf((UINTN)Sel));
+}
+
+// ---- Advanced Menu: Apple GPU power preference in NVRAM ----
+// Variable gpu-power-prefs, vendor GUID fa4ce28d-b62f-4c99-9cc3-6815686e30f9 (the one macOS
+// `nvram` writes). Value 01 00 00 00 makes the firmware use the Intel iGPU at the next boot;
+// without the variable the firmware default (the Radeon) is used. So:
+//   Switch to iGPU = write 01 00 00 00      Switch to dGPU = delete the variable
+// The entry that would change nothing is hidden: variable present -> only "Switch to dGPU",
+// variable absent -> only "Switch to iGPU". If the read itself fails, both are shown.
+// The change is read by the firmware at the next boot, so it needs a restart.
+#define GPU_PREFS_NAME  L"gpu-power-prefs"
+#define GPU_PREFS_ATTR  0x07            // NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS, as macOS writes it
+static EFI_GUID GpuPrefsGuid = { 0xfa4ce28d, 0xb62f, 0x4c99, { 0x9c, 0xc3, 0x68, 0x15, 0x68, 0x6e, 0x30, 0xf9 } };
+
+typedef struct {
+    BOOLEAN Known;                      // the variable could be queried (found or not found)
+    BOOLEAN Present;
+    UINTN   Size;
+    UINT8   Data[4];                    // first bytes of the value
+    EFI_STATUS Status;
+} GPU_PREFS;
+
+static VOID
+GpuPrefsRead(EFI_RUNTIME_SERVICES *RT, GPU_PREFS *P)
+{
+    UINT8 Buf[16];
+    UINTN Size = sizeof(Buf);
+    UINT32 Attr = 0;
+
+    for (UINTN i = 0; i < sizeof(*P); i++)
+        ((UINT8 *)P)[i] = 0;
+    P->Status = RT->GetVariable(GPU_PREFS_NAME, &GpuPrefsGuid, &Attr, &Size, Buf);
+    if (P->Status == EFI_SUCCESS || P->Status == EFI_BUFFER_TOO_SMALL) {
+        P->Known = TRUE;
+        P->Present = TRUE;
+        P->Size = Size;
+        for (UINTN i = 0; i < sizeof(P->Data) && i < Size && i < sizeof(Buf); i++)
+            P->Data[i] = Buf[i];
+    } else if (P->Status == EFI_NOT_FOUND) {
+        P->Known = TRUE;
+    }
+}
+
+// Write the value (iGPU) or delete the variable (dGPU), then read it back.
+static EFI_STATUS
+GpuPrefsApply(EFI_RUNTIME_SERVICES *RT, BOOLEAN ToIGpu)
+{
+    GPU_PREFS P;
+    EFI_STATUS St;
+
+    if (ToIGpu) {
+        UINT8 Val[4] = { 0x01, 0x00, 0x00, 0x00 };
+        St = RT->SetVariable(GPU_PREFS_NAME, &GpuPrefsGuid, GPU_PREFS_ATTR, sizeof(Val), Val);
+    } else {
+        St = RT->SetVariable(GPU_PREFS_NAME, &GpuPrefsGuid, GPU_PREFS_ATTR, 0, NULL);
+        if (St == EFI_NOT_FOUND)
+            St = EFI_SUCCESS;           // already absent
+    }
+    if (EFI_ERROR(St))
+        return St;
+
+    GpuPrefsRead(RT, &P);
+    if (ToIGpu)
+        return (P.Present && P.Size == 4 && P.Data[0] == 0x01) ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+    return (P.Known && !P.Present) ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+}
+
+typedef enum { ADV_TO_DGPU = 0, ADV_TO_IGPU, ADV_BACK } ADV_ITEM;
+static CHAR16 *AdvText[3] = {
+    L"Switch to dGPU (delete gpu-power-prefs)",
+    L"Switch to iGPU (set gpu-power-prefs)",
+    L"Back",
+};
+
+static VOID
+AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTERFACE *ConIn,
+             _INT_SimpleTextGraphicsStruct *gs)
+{
+    ADV_ITEM Items[3];
+    UINTN N = 0;
+    UINTN Sel = 0;
+    BOOLEAN Dirty = TRUE;
+    BOOLEAN Done = FALSE;
+
+    while (!Done) {
+        if (Dirty) {
+            GPU_PREFS P;
+
+            GpuPrefsRead(RT, &P);
+            N = 0;
+            if (!P.Known || P.Present)
+                Items[N++] = ADV_TO_DGPU;       // hidden while the variable is absent
+            if (!P.Known || !P.Present)
+                Items[N++] = ADV_TO_IGPU;       // hidden while the variable is present
+            Items[N++] = ADV_BACK;
+            if (Sel >= N)
+                Sel = N - 1;
+
+            UI_PRINT(gs, ROW_MENU_HDR, L"Advanced Menu:");
+            for (UINTN r = 0; r < MENU_ROWS; r++)
+                UiBlank(gs, MENU_ROW + r);
+            for (UINTN i = 0; i < N; i++)
+                UI_PRINT(gs, MENU_ROW + i, L"%s %s", (i == Sel) ? L">" : L" ", AdvText[Items[i]]);
+
+            if (!P.Known) {
+                UI_PRINT(gs, TIMER_ROW, L"gpu-power-prefs: cannot be read (%lX)", P.Status);
+            } else if (!P.Present) {
+                UI_PRINT(gs, TIMER_ROW, L"gpu-power-prefs: not set (firmware default)");
+            } else if (P.Size == 4) {
+                UI_PRINT(gs, TIMER_ROW, L"gpu-power-prefs: set = %02x %02x %02x %02x%s",
+                         (UINTN)P.Data[0], (UINTN)P.Data[1], (UINTN)P.Data[2], (UINTN)P.Data[3],
+                         (P.Data[0] == 0x01) ? L" (iGPU)" : L"");
+            } else {
+                UI_PRINT(gs, TIMER_ROW, L"gpu-power-prefs: set, %d byte(s)", (UINTN)P.Size);
+            }
+            UI_PRINT(gs, HINT_ROW, L"Up/Down + Enter. Esc = back. A change needs a restart.");
+            UiRefreshHighlight(gs, MENU_ROW + Sel);
+            Dirty = FALSE;
+        }
+
+        {
+            EFI_INPUT_KEY Key;
+            UINTN Idx = 0;
+            CHAR16 c;
+
+            if (EFI_ERROR(BS->WaitForEvent(1, &ConIn->WaitForKey, &Idx))) {
+                BS->Stall(50000);
+                continue;
+            }
+            Key.UnicodeChar = 0;
+            Key.ScanCode = 0;
+            if (EFI_ERROR(ConIn->ReadKeyStroke(ConIn, &Key)))
+                continue;
+            c = Key.UnicodeChar;
+
+            if (Key.ScanCode == 0x01) {                         // Up
+                Sel = (Sel + N - 1) % N;
+                Dirty = TRUE;
+            } else if (Key.ScanCode == 0x02) {                  // Down
+                Sel = (Sel + 1) % N;
+                Dirty = TRUE;
+            } else if (Key.ScanCode == 0x17) {                  // Esc
+                Done = TRUE;
+            } else if (c == 0x0D || c == 0x0A || c == L' ') {   // Enter / Space
+                if (Items[Sel] == ADV_BACK) {
+                    Done = TRUE;
+                } else {
+                    BOOLEAN ToIGpu = (Items[Sel] == ADV_TO_IGPU);
+                    EFI_STATUS St = GpuPrefsApply(RT, ToIGpu);
+
+                    if (!EFI_ERROR(St))
+                        UI_STATUS(gs, L"%s done, restart to apply", ToIGpu ? L"Switch to iGPU" : L"Switch to dGPU");
+                    else
+                        UI_STATUS(gs, L"%s FAILED (%lX)", ToIGpu ? L"Switch to iGPU" : L"Switch to dGPU", St);
+                    Sel = 0;
+                    Dirty = TRUE;                               // the hidden entry swaps
+                }
+            }
+        }
+    }
+
+    // back to the boot menu: the caller redraws the entries and the timer row
+    UI_PRINT(gs, ROW_MENU_HDR, L"Boot mode:");
+    UI_PRINT(gs, HINT_ROW, UI_HINT_MAIN);
 }
 
 static VOID
@@ -966,8 +1143,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     UI_STATUS(&gs, L"bootx64_original.efi ready");
 
     // ---- boot mode menu ----
-    // Up/Down = move (over modes only, the separator is skipped), Enter/Space = confirm,
-    // 1..5 = pick and confirm at once (old letters D/A/H/I still work for 1..4),
+    // Up/Down = move (over entries only, the separators are skipped), Enter/Space = confirm,
+    // 1..5 = pick and confirm at once (old letters D/A/H/I still work for 1..4), 6 = Advanced Menu,
     // X = save the highlighted mode as the default (marked x). Any key stops the auto-boot
     // timer; if no key is pressed for COUNTDOWN_SECS the default mode is started.
     BOOT_MODE Def = DefaultLoad(BS, ImageHandle);
@@ -1014,20 +1191,24 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             CHAR16 c = Key.UnicodeChar;
 
             if (Key.ScanCode == 0x01) {                // Up
-                Sel = (BOOT_MODE)((Sel + MODE_COUNT - 1) % MODE_COUNT);
+                Sel = (BOOT_MODE)((Sel + MENU_ITEMS - 1) % MENU_ITEMS);
                 TimerOn = FALSE;
             } else if (Key.ScanCode == 0x02) {         // Down
-                Sel = (BOOT_MODE)((Sel + 1) % MODE_COUNT);
+                Sel = (BOOT_MODE)((Sel + 1) % MENU_ITEMS);
                 TimerOn = FALSE;
             } else if (c == 0x0D || c == 0x0A || c == L' ') {   // Enter / Space
                 Want = TRUE;
             } else if (c == L'x' || c == L'X') {          // save the highlighted mode as default
-                EFI_STATUS DS = DefaultSave(BS, ImageHandle, Sel);
-                if (!EFI_ERROR(DS)) {
-                    Def = Sel;
-                    UI_STATUS(&gs, L"default saved: %s", MenuName[Def]);
+                if ((UINTN)Sel == MENU_ADV) {
+                    UI_STATUS(&gs, L"Advanced Menu cannot be the default");
                 } else {
-                    UI_STATUS(&gs, L"default NOT saved (%lX)", DS);
+                    EFI_STATUS DS = DefaultSave(BS, ImageHandle, Sel);
+                    if (!EFI_ERROR(DS)) {
+                        Def = Sel;
+                        UI_STATUS(&gs, L"default saved: %s", MenuName[Def]);
+                    } else {
+                        UI_STATUS(&gs, L"default NOT saved (%lX)", DS);
+                    }
                 }
                 TimerOn = FALSE;
             } else if (c == L'1' || c == L'd' || c == L'D') {
@@ -1040,6 +1221,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 Sel = MODE_INTEL; Want = TRUE;
             } else if (c == L'5') {
                 Sel = MODE_INTEL_DGPU_ON; Want = TRUE;
+            } else if (c == L'6') {
+                Sel = (BOOT_MODE)MENU_ADV; Want = TRUE;
             } else {
                 TimerOn = FALSE;                       // any other key just stops the timer
             }
@@ -1055,7 +1238,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             const CHAR16 *Why = NULL;
 
             Want = FALSE;
-            if (ModeAvailable(BS, ImageHandle, Sel, &Why)) {
+            if ((UINTN)Sel == MENU_ADV) {
+                // not a boot mode: open the submenu, then come back to this menu
+                AdvancedMenu(BS, SystemTable->RuntimeServices, ConIn, &gs);
+                TimerOn = FALSE;
+                Dirty = TRUE;
+            } else if (ModeAvailable(BS, ImageHandle, Sel, &Why)) {
                 Chosen = TRUE;
             } else {
                 // refuse: stay in the menu, stop the timer, show the reason

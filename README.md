@@ -15,8 +15,8 @@ If you find this project useful, consider buying me a coffee!
 
 ## What it does
 
-When the Mac starts, the loader shows a menu with five modes (a row of `*************` separates the
-first four from mode 5; it cannot be selected). You pick one (or it picks the default after
+When the Mac starts, the loader shows a menu with five boot modes and an **Advanced Menu** entry. Rows of
+`*************` split them into groups; they cannot be selected. You pick one (or it picks the default after
 5 seconds), the loader prepares the GPUs and then starts the normal Windows boot loader.
 
 | Key | Mode | What it does |
@@ -27,6 +27,8 @@ first four from mode 5; it cannot be selected). You pick one (or it picks the de
 | **4** | Integrated gfx + built-in VBT | Same as 3, but the VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
 | | `*************` | separator, not selectable |
 | **5** | Integrated gfx + built-in VBT, Radeon ON | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate, brightness-only file: no sleep fix, sleep is left as the firmware has it. |
+| | `*************` | separator, not selectable |
+| **6** | Advanced Menu | Does not boot anything. Opens a submenu to switch the GPU power preference in NVRAM (see **Advanced Menu**). |
 
 Modes 3 and 4 both move Windows to the Intel iGPU, but they behave differently after a graphics driver
 restart (see **What to expect**). **Mode 3 is recommended.** Mode 4 needs no hand-made VBT: the iGPU
@@ -192,13 +194,34 @@ Intel control panel: http://www.microsoft.com/store/apps/9PLFNLNT3G5G
 
 ## Use
 
-- **Up / Down + Enter** (or Space) starts the highlighted mode. The `*************` separator is skipped:
-  the highlight only moves over modes. Pressing **1**-**5** starts that mode at once.
+- **Up / Down + Enter** (or Space) starts the highlighted mode. The `*************` separators are skipped:
+  the highlight only moves over entries. Pressing **1**-**5** starts that mode at once, **6** opens the
+  Advanced Menu.
 - If you press nothing for 5 seconds, the **default** mode starts. Any key stops the timer.
 - The default mode is marked with an **x**. Press **X** to make the highlighted mode the default (it is
   saved in `t2gmux_default.txt` on the EFI partition; delete the file to go back to mode 4). X only saves,
-  it does not start anything.
+  it does not start anything. The Advanced Menu cannot be the default.
 - The bottom of the screen lists the graphics cards the loader sees.
+
+## Advanced Menu
+
+Entry **6** opens a submenu instead of booting. It edits the Apple NVRAM variable `gpu-power-prefs`
+(vendor GUID `fa4ce28d-b62f-4c99-9cc3-6815686e30f9`), the one `nvram` writes in macOS.
+
+| Entry | What it does |
+|-------|--------------|
+| Switch to iGPU | Writes `01 00 00 00`. With that value the firmware uses the Intel iGPU at the next boot. |
+| Switch to dGPU | Deletes the variable, back to the firmware default (the Radeon). |
+| Back | Returns to the boot menu (Esc does the same). |
+
+Only the entry that would change something is shown: if the variable exists only **Switch to dGPU**
+is listed, if it does not exist only **Switch to iGPU**. If the variable cannot be read at all, both are
+listed. A line under the entries shows the current value. After a switch the status line shows the result
+(checked by reading the variable back). The firmware reads the variable at boot, so the change needs a
+**restart**.
+
+The write is done from the UEFI loader and has not been tested on hardware. To undo it, use
+**Switch to dGPU**, or reset the NVRAM of the Mac (Cmd + Option + P + R while powering on).
 
 ## What to expect
 
