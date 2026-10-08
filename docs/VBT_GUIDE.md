@@ -1,4 +1,4 @@
-# How to make `t2gmux_vbt.bin` (VBT for modes 3 and 4)
+# How to make `t2gmux_vbt.bin` (VBT for mode 3; mode 4 needs no file)
 
 The T2 firmware leaves the Intel OpRegion VBT mailbox empty, so the Windows Intel driver does not know
 that an eDP panel sits on DDI A and never starts link training. The VBT file fixes that.
@@ -6,7 +6,7 @@ that an eDP panel sits on DDI A and never starts link training. The VBT file fix
 | Mode | How the VBT is used |
 |------|---------------------|
 | 3, Integrated gfx | `t2gmux_vbt.bin` is embedded **into** `SSDT_IGPU_VBT.aml` at build time (`make_ssdt_igpu.py --vbt`). The file itself is not needed on the ESP. |
-| 4, Integrated gfx + built-in VBT | **No file needed.** The loader carries a generic VBT (`lib/vbt_base.c`, regenerate with `tools/gen_vbt_base.py`) and fills in the panel: link rate / lanes / PSR from the DPCD and the timing from the EDID, both read through the iGPU's own AUX-A channel (EDID: the dGPU's copy is tried first). If `t2gmux_vbt.bin` exists in the ESP root it is injected instead and used as it is. Used together with `SSDT_IGPU.aml` (built without `--vbt`). |
+| 4, Integrated gfx + built-in VBT | **No file needed.** The loader carries a generic VBT (`lib/vbt_base.c`, regenerate with `tools/gen_vbt_base.py`) and fills in the panel: link rate / lanes from the DPCD (PSR stays off: it makes the panel flicker) and the timing from the EDID, both read through the iGPU's own AUX-A channel (EDID: the dGPU's copy is tried first). A `t2gmux_vbt.bin` on the ESP is **ignored** in mode 4. Used together with `SSDT_IGPU.aml` (built without `--vbt`). |
 
 Modes 1 and 2 do not use a VBT.
 
@@ -117,11 +117,11 @@ trial order above needs nothing but the loader.
 
 ## 5. Use the result
 
-**Mode 4** (Integrated gfx + separate VBT):
+**Mode 4** (Integrated gfx + built-in VBT):
 
 1. Build `SSDT_IGPU.aml` **without** `--vbt` (see [ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md)).
-2. Copy to the ESP root: `SSDT_IGPU.aml` and `t2gmux_vbt.bin`.
-3. In the loader press **4**. If either file is missing, the mode is refused and the status line names it.
+2. Copy to the ESP root: `SSDT_IGPU.aml` only. No VBT file.
+3. In the loader press **4**. If `SSDT_IGPU.aml` is missing, the mode is refused and the status line names it.
 
 **Mode 3** (Integrated gfx):
 

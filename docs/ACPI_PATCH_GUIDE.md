@@ -34,11 +34,10 @@ The loader menu has four modes:
 | **1** | Standard Boot | none | none |
 | **2** | Boot + Apple_set_os | none | none |
 | **3** | Integrated gfx | `\SSDT_IGPU_VBT.aml` | inside the SSDT (built with `--vbt`) |
-| **4** | Integrated gfx + separate VBT | `\SSDT_IGPU.aml` | injected from UEFI, file `\t2gmux_vbt.bin` |
+| **4** | Integrated gfx + built-in VBT | `\SSDT_IGPU.aml` | built into the loader, completed from the panel (DPCD / EDID), injected from UEFI; no file |
 
 A mode whose files are missing cannot be started. The menu stays, the timer stops and the status line
-names the missing file (for mode 3 `SSDT_IGPU_VBT.aml`; for mode 4 `SSDT_IGPU.aml` and / or
-`t2gmux_vbt.bin`). This also applies to the auto-boot default.
+names the missing file (for mode 3 `SSDT_IGPU_VBT.aml`; for mode 4 `SSDT_IGPU.aml`). This also applies to the auto-boot default.
 
 Modes **1** and **2** never load an SSDT.
 
@@ -60,7 +59,7 @@ So your SSDT must define **new** `_BCM`, `_PTS`, `_WAK` that call the renamed or
 by the AML.
 
 Mode **3** does not inject a VBT from UEFI: its VBT comes from `SSDT_IGPU_VBT.aml`. Mode **4**
-injects `\t2gmux_vbt.bin` from UEFI and applies the EDID timing from the Radeon; its SSDT
+injects its built-in VBT from UEFI (link from the panel DPCD, timing from the EDID); its SSDT
 (`SSDT_IGPU.aml`) carries no VBT.
 
 ## 3. Prerequisites
@@ -165,20 +164,20 @@ Rules:
 The T2 firmware leaves the Intel OpRegion VBT mailbox empty, so the Windows Intel driver never learns
 about the eDP panel on DDI A. The two modes deliver the VBT differently, and each needs its own SSDT:
 
-| | Mode 3, Integrated gfx | Mode 4, Integrated gfx + separate VBT |
+| | Mode 3, Integrated gfx | Mode 4, Integrated gfx + built-in VBT |
 |---|---|---|
 | SSDT file | `SSDT_IGPU_VBT.aml` | `SSDT_IGPU.aml` |
 | Built with | `--vbt t2gmux_vbt.bin` | no `--vbt` |
-| VBT delivered by | ACPI: `IGPU._INI` inside the SSDT | UEFI: loader reads `\t2gmux_vbt.bin` |
-| `t2gmux_vbt.bin` on the ESP | not needed (used only at build time) | required |
+| VBT delivered by | ACPI: `IGPU._INI` inside the SSDT | UEFI: built-in VBT, completed from the panel |
+| `t2gmux_vbt.bin` on the ESP | not needed (used only at build time) | not used |
 | EDID timing from the Radeon | no, the timing of the file stays | yes, written into the injected VBT |
 
 How the ACPI route (mode 3) works: the SSDT built with `--vbt` carries the VBT and `IGPU._INI` copies
 it to OpRegion+0x400 (mailbox 4, 0x1800 bytes max) while ACPI initialises, before the Intel driver
 starts.
 
-How the UEFI route (mode 4) works: the loader reads `\t2gmux_vbt.bin`, writes it to OpRegion+0x400,
-then applies the EDID timing it finds on the Radeon.
+How the UEFI route (mode 4) works: the loader writes its built-in VBT to OpRegion+0x400, patches the
+link from the panel DPCD (PSR stays off) and the timing from the EDID (Radeon, else the panel over AUX).
 
 Build steps for the VBT:
 
@@ -230,7 +229,7 @@ Deliver the file(s) and say plainly that they were not run on hardware. On the t
 the ESP root, named exactly as in the table in section 1:
 
 - mode 3: `\SSDT_IGPU_VBT.aml`
-- mode 4: `\SSDT_IGPU.aml` and `\t2gmux_vbt.bin`
+- mode 4: `\SSDT_IGPU.aml`
 
 The loader progress screen shows `ACPI patch <file name>: ...` with the name of the file that mode
 used: `OK` = applied, `FAILED` = a check failed and the renames were reverted. A missing file is

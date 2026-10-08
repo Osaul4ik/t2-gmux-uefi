@@ -35,15 +35,15 @@ asks the panel what it supports.
 |------|-----------------------------------------------|
 | 1, 2 | nothing |
 | 3 | `SSDT_IGPU_VBT.aml` |
-| 4 | `SSDT_IGPU.aml` (`t2gmux_vbt.bin` is optional: if present it overrides the built-in VBT) |
+| 4 | `SSDT_IGPU.aml` |
 
 If a file is missing, that mode cannot be started: the menu stays, the timer stops and the status line
 says which file is missing.
 
 How to get the files: see **Install** below (Claude makes them from your EDID and ACPI dumps). Background:
 
-- `t2gmux_vbt.bin` (optional override, mode 4 / baked into mode 3): [docs/VBT_GUIDE.md](docs/VBT_GUIDE.md).
-  In mode 4 the loader reads the same data from the panel itself (DPCD + EDID over AUX-A).
+- `t2gmux_vbt.bin` (only to build `SSDT_IGPU_VBT.aml` for mode 3): [docs/VBT_GUIDE.md](docs/VBT_GUIDE.md).
+  Mode 4 needs no VBT file: the loader reads the same data from the panel itself (DPCD + EDID over AUX-A).
 - `SSDT_IGPU.aml` / `SSDT_IGPU_VBT.aml` (brightness, sleep, optional VBT):
   [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md).
 
@@ -104,7 +104,7 @@ Message to Claude (copy, change the mode):
 Make the patch files for my MacBook Pro (T2) for mode 4 (or 3, or both).
 Follow docs/ACPI_PATCH_GUIDE.md and docs/VBT_GUIDE.md from the project archive step by step.
 Attached: panel EDID (edid_*.bin), DSDT and SSDT dumps (*.dat), the project archive.
-Give me the ready files: t2gmux_vbt.bin, SSDT_IGPU.aml (mode 4) and/or SSDT_IGPU_VBT.aml (mode 3).
+Give me the ready files: SSDT_IGPU.aml (mode 4) and/or SSDT_IGPU_VBT.aml (mode 3, built with t2gmux_vbt.bin).
 Show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
 ```
 
@@ -140,7 +140,7 @@ The files made by Claude go to the **root** of the EFI partition (`S:\` or `/Vol
 | Mode | Copy to the root of the EFI partition |
 |------|----------------------------------------|
 | 3 | `SSDT_IGPU_VBT.aml` |
-| 4 | `SSDT_IGPU.aml` (and `t2gmux_vbt.bin` only if you want to override the built-in VBT) |
+| 4 | `SSDT_IGPU.aml` |
 
 Names must match exactly. The result:
 
@@ -152,7 +152,6 @@ EFI partition
 │       └── bootx64_original.efi    <- the original Windows boot loader
 ├── SSDT_IGPU_VBT.aml               <- mode 3
 ├── SSDT_IGPU.aml                   <- mode 4
-├── t2gmux_vbt.bin                  <- optional (overrides the built-in VBT in mode 4)
 └── t2gmux_default.txt              <- created by the loader (key X)
 ```
 

@@ -23,7 +23,7 @@ What the SSDT contains (brightness, sleep, optional VBT) and how to rebuild it:
 ## Panel data from the dGPU (EDID substitution, mode 4)
 
 Apple's EFI publishes panel data only for the Radeon (its GOP handle carries the EDID protocol);
-the iGPU has an empty VBT mailbox. After `t2gmux_vbt.bin` is injected, the loader looks for an
+the iGPU has an empty VBT mailbox. After the built-in VBT is injected, the loader looks for an
 internal-panel EDID (EDID active protocol first, then discovered; manufacturer `APP`, valid header
 and checksum, first descriptor is a DTD) and writes its first DTD and the active size into the
 injected VBT (BDB 41 for the panel index from BDB 40), then fixes the VBT checksum. If the firmware
@@ -63,12 +63,10 @@ the panel link itself, hence the VBT injection).
 Apple's T2 firmware leaves the Intel OpRegion VBT mailbox empty, so the Windows Intel driver does
 not know an eDP panel sits on DDI A.
 
-1. Get your panel EDID in Windows: `tools/get_edid.ps1` (writes `edid_N.bin`).
-2. `python tools/make_vbt.py --edid edid_1.bin --lanes 4 --rate hbr2`
-   -> `t2gmux_vbt.bin` (built from a real coreboot Whiskey Lake VBT, see
-   `tools/template/`; only the eDP child on DDI A stays enabled).
-3. Copy `t2gmux_vbt.bin` to the ESP root (together with `SSDT_IGPU.aml`).
-4. At the countdown press **4**. The loader copies the VBT into OpRegion+0x400 and re-reads it.
+Mode 4 needs no VBT file. The loader carries a VBT built from a real coreboot Whiskey Lake VBT (see
+`tools/template/`, `tools/gen_vbt_base.py`; only the eDP child on DDI A stays enabled), completes it
+from the panel (see the live eDP probe section below) and copies it into OpRegion+0x400, then re-reads it.
+Copy `SSDT_IGPU.aml` to the ESP root and press **4** at the countdown.
 
 (Mode 3 delivers the VBT through ACPI instead: `SSDT_IGPU_VBT.aml`, see the guide.)
 
@@ -102,8 +100,9 @@ Instead of guessing `--lanes/--rate`, `lib/int_edp.c` asks the panel through the
 3. Native AUX reads on `DP_AUX_CH_CTL_A` (0x64010): DPCD `0x000..0x00F`, `0x700` (eDP rev), `0x010` (eDP 1.4
    `SUPPORTED_LINK_RATES`), `0x070` (PSR). Up to 5 attempts per transfer, every wait bounded.
 4. EDID block 0 over I2C-over-AUX (address 0x50).
-5. `_INT_VbtSetLink` patches rate / lanes (BDB 27), clears fast link training, switches PSR off if the panel
-   has none, fixes the checksum. The DTD comes from the dGPU's EDID, else from step 4.
+5. `_INT_VbtSetLink` patches rate / lanes (BDB 27), clears fast link training, fixes the checksum. PSR is always
+   left **off** (base VBT generated with `--psr off`, and the probe never enables it): with PSR on the Intel
+   driver makes the T2 panel flicker. The DTD comes from the dGPU's EDID, else from step 4.
 
 If the probe fails, the built-in defaults (4 x HBR2) are kept; if there is no EDID at all the mailbox is left
 empty rather than given a placeholder timing. `DDI_A_4_LANES` is only forced when the panel reports 4 lanes.

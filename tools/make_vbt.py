@@ -22,6 +22,8 @@ Copy the result to the ESP root as  \\t2gmux_vbt.bin  and boot the loader with k
 Layouts follow the Linux kernel's drivers/gpu/drm/i915/display/intel_vbt_defs.h.
 """
 import argparse, os, re, struct, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from vbt_psr import apply_psr
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TEMPLATE = os.path.join(HERE, "template", "coreboot_google_sarien_data.vbt")
@@ -80,6 +82,12 @@ def main():
                     help="none (default): tell Intel it has no backlight control - the T2 panel is dimmed by gmux (ACPI _BCM), "
                          "not by an Intel PWM; pwm: keep the template's PWM data")
     ap.add_argument("--keep-fast-link", action="store_true", help="leave fast link training as in the template")
+    ap.add_argument("--psr", choices=["keep", "on", "off"], default="keep", help="Panel Self Refresh switch in the VBT (default keep = as in template); see tools/vbt_psr.py")
+    ap.add_argument("--psr-idle-frames", type=int)
+    ap.add_argument("--psr-tp1", type=int, help="us: 0,100,500,2500")
+    ap.add_argument("--psr-tp2", type=int, help="us: 0,100,500,2500")
+    ap.add_argument("--psr-full-link", type=int, choices=[0, 1])
+    ap.add_argument("--psr-aux-wake", type=int, choices=[0, 1])
     ap.add_argument("-o", "--out", default="t2gmux_vbt.bin")
     a = ap.parse_args()
 
@@ -166,6 +174,9 @@ def main():
         print("backlight: type NONE (brightness is done by gmux / ACPI _BCM)")
     else:
         print("backlight: template PWM data kept")
+
+    for line in apply_psr(t, a.psr, a.psr_idle_frames, a.psr_tp1, a.psr_tp2, a.psr_full_link, a.psr_aux_wake):
+        print(line)
 
     # --- checksum: whole VBT must sum to 0 ---
     t[26] = 0
