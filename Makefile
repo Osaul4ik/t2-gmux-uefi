@@ -2,7 +2,7 @@ ARCH	= x86_64
 
 TARGET	= bootx64.efi
 FORMAT 	= efi-app-$(ARCH)
-OBJS	= ./lib/int_event.o ./lib/int_graphics.o ./lib/int_mem.o ./lib/int_dpath.o ./lib/int_print.o ./lib/pci_db.o ./lib/int_vbt.o ./lib/int_opregion.o ./lib/int_acpi.o bootx64.o
+OBJS	= ./lib/int_event.o ./lib/int_graphics.o ./lib/int_mem.o ./lib/int_dpath.o ./lib/int_print.o ./lib/pci_db.o ./lib/int_vbt.o ./lib/int_opregion.o ./lib/int_edp.o ./lib/int_vbtpatch.o ./lib/vbt_base.o ./lib/int_acpi.o bootx64.o
 
 # gnu-efi paths: Debian/Ubuntu put headers in /usr/include/efi and libs either
 # in /usr/lib or under the multiarch triplet (bookworm+).

@@ -6,7 +6,7 @@ that an eDP panel sits on DDI A and never starts link training. The VBT file fix
 | Mode | How the VBT is used |
 |------|---------------------|
 | 3, Integrated gfx | `t2gmux_vbt.bin` is embedded **into** `SSDT_IGPU_VBT.aml` at build time (`make_ssdt_igpu.py --vbt`). The file itself is not needed on the ESP. |
-| 4, Integrated gfx + separate VBT | `t2gmux_vbt.bin` is copied to the ESP root and injected by the loader. Used together with `SSDT_IGPU.aml` (built without `--vbt`). |
+| 4, Integrated gfx + built-in VBT | **No file needed.** The loader carries a generic VBT (`lib/vbt_base.c`, regenerate with `tools/gen_vbt_base.py`) and fills in the panel: link rate / lanes / PSR from the DPCD and the timing from the EDID, both read through the iGPU's own AUX-A channel (EDID: the dGPU's copy is tried first). If `t2gmux_vbt.bin` exists in the ESP root it is injected instead and used as it is. Used together with `SSDT_IGPU.aml` (built without `--vbt`). |
 
 Modes 1 and 2 do not use a VBT.
 
@@ -146,3 +146,18 @@ EOF
 (for example the native resolution of your MacBook model). If it does not, you picked the wrong EDID.
 
 The template VBT is data from the coreboot project (GPL-2.0).
+
+## 7. PSR (Panel Self Refresh)
+
+The VBT only tells the Intel driver that it *may* use PSR; the panel must also report PSR in DPCD (0x070).
+The coreboot template already has PSR on (BDB 228: block 44 `psr` mask, plus the block 9 table with 2500 us wakeups),
+so `make_vbt.py` output has PSR enabled by default. Inspect / switch / tune an existing VBT:
+
+```
+python tools/vbt_psr.py t2gmux_vbt.bin --show
+python tools/vbt_psr.py t2gmux_vbt.bin --psr off -o t2gmux_vbt_psr_off.bin
+python tools/vbt_psr.py t2gmux_vbt.bin --psr on --idle-frames 6 --tp1 500 --tp2 500 -o out.bin
+```
+
+`make_vbt.py` takes the same options as `--psr on|off|keep`, `--psr-idle-frames`, `--psr-tp1`, `--psr-tp2`.
+Mode 3 needs `make_ssdt_igpu.py --vbt` run again after any change.

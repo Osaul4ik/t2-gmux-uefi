@@ -11,8 +11,6 @@ If you find this project useful, consider buying me a coffee!
 
 [![Ko-fi](https://img.shields.io/badge/Support%20me%20on-Ko--fi-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/osaul4ik)
 
-## Attention
-MacBookPro16,4 (Radeon Pro 5600M) may require additional testing. Sleep/resume may have model-specific issues.
 
 
 ## What it does
@@ -25,11 +23,11 @@ When the Mac starts, the loader shows a menu with four modes. You pick one (or i
 | **1** | Standard Boot | Clean boot without AppleSetOs or patches. Windows starts as if the loader was not there. |
 | **2** | Boot + Apple_set_os | Standard boot + the apple_set_os patch. Windows sees both GPUs (Radeon and Intel HD). |
 | **3** | Integrated gfx (**recommended**) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT (panel data) is inside the ACPI patch. |
-| **4** | Integrated gfx + separate VBT | Same as 3, but the VBT is a separate file injected by the loader (it also takes the panel timing from the Radeon). **Default.** |
+| **4** | Integrated gfx + built-in VBT | Same as 3, but the VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
 
 Modes 3 and 4 both move Windows to the Intel iGPU, but they behave differently after a graphics driver
-restart (see **What to expect**). **Mode 3 is recommended.** Use mode 4 only if you need the separate
-VBT file.
+restart (see **What to expect**). **Mode 3 is recommended.** Mode 4 needs no hand-made VBT: the iGPU
+asks the panel what it supports.
 
 ## What you need to prepare
 
@@ -37,15 +35,15 @@ VBT file.
 |------|-----------------------------------------------|
 | 1, 2 | nothing |
 | 3 | `SSDT_IGPU_VBT.aml` |
-| 4 | `SSDT_IGPU.aml` and `t2gmux_vbt.bin` |
+| 4 | `SSDT_IGPU.aml` (`t2gmux_vbt.bin` is optional: if present it overrides the built-in VBT) |
 
 If a file is missing, that mode cannot be started: the menu stays, the timer stops and the status line
 says which file is missing.
 
 How to get the files: see **Install** below (Claude makes them from your EDID and ACPI dumps). Background:
 
-- `t2gmux_vbt.bin` (panel data): [docs/VBT_GUIDE.md](docs/VBT_GUIDE.md). The only thing you need is the
-  panel EDID from Windows (`tools/get_edid.ps1`).
+- `t2gmux_vbt.bin` (optional override, mode 4 / baked into mode 3): [docs/VBT_GUIDE.md](docs/VBT_GUIDE.md).
+  In mode 4 the loader reads the same data from the panel itself (DPCD + EDID over AUX-A).
 - `SSDT_IGPU.aml` / `SSDT_IGPU_VBT.aml` (brightness, sleep, optional VBT):
   [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md).
 
@@ -142,7 +140,7 @@ The files made by Claude go to the **root** of the EFI partition (`S:\` or `/Vol
 | Mode | Copy to the root of the EFI partition |
 |------|----------------------------------------|
 | 3 | `SSDT_IGPU_VBT.aml` |
-| 4 | `SSDT_IGPU.aml` and `t2gmux_vbt.bin` |
+| 4 | `SSDT_IGPU.aml` (and `t2gmux_vbt.bin` only if you want to override the built-in VBT) |
 
 Names must match exactly. The result:
 
@@ -154,7 +152,7 @@ EFI partition
 │       └── bootx64_original.efi    <- the original Windows boot loader
 ├── SSDT_IGPU_VBT.aml               <- mode 3
 ├── SSDT_IGPU.aml                   <- mode 4
-├── t2gmux_vbt.bin                  <- mode 4
+├── t2gmux_vbt.bin                  <- optional (overrides the built-in VBT in mode 4)
 └── t2gmux_default.txt              <- created by the loader (key X)
 ```
 

@@ -87,3 +87,28 @@ tool does not read them). The template VBT is data from the coreboot project (GP
 (`--backlight pwm` keeps the template's PWM data). The panel on the T2 MacBook is dimmed by gmux
 (port 0x74, driven through ACPI `_BCM`, see the ACPI patch above), not by an Intel PWM, so the
 Intel driver must not claim a PWM it cannot use.
+## Live eDP probe instead of a hand-made VBT (mode 4)
+
+The ACPI tables of the T2 Macs contain no eDP link training for either GPU. The "link training" names
+in the Radeon SSDT (`LTRN`, `LTRC`, `LCRL`, `LSTS`, method `PUPD`) retrain the **PCIe** link of the PEG
+slot. DisplayPort link training is done by the graphics driver: the Radeon driver for the dGPU, the Intel
+driver for DDI A. The Intel driver only starts it if the VBT says an eDP panel is on DDI A, and it takes
+the link limits (rate, lanes, PSR) from the VBT. Apple leaves the VBT empty, so the loader supplies one.
+
+Instead of guessing `--lanes/--rate`, `lib/int_edp.c` asks the panel through the iGPU, as i915 would:
+
+1. Request the power wells AUX-A needs (`PWR_WELL_CTL2`: PW1 and DDI A/E IO) if they are down.
+2. If the panel is off (`PP_STATUS` bit 31 clear), force VDD (`PP_CONTROL` bit 3), wait 150 ms, release it after.
+3. Native AUX reads on `DP_AUX_CH_CTL_A` (0x64010): DPCD `0x000..0x00F`, `0x700` (eDP rev), `0x010` (eDP 1.4
+   `SUPPORTED_LINK_RATES`), `0x070` (PSR). Up to 5 attempts per transfer, every wait bounded.
+4. EDID block 0 over I2C-over-AUX (address 0x50).
+5. `_INT_VbtSetLink` patches rate / lanes (BDB 27), clears fast link training, switches PSR off if the panel
+   has none, fixes the checksum. The DTD comes from the dGPU's EDID, else from step 4.
+
+If the probe fails, the built-in defaults (4 x HBR2) are kept; if there is no EDID at all the mailbox is left
+empty rather than given a placeholder timing. `DDI_A_4_LANES` is only forced when the panel reports 4 lanes.
+The inject log (`*_inject.txt` with key D) lists every step, including the raw register values.
+
+Host tests (no hardware, `gcc` only): `tests/host/run.sh`. They check the VBT patcher byte-for-byte against
+`make_vbt.py`, and the AUX code against a simulated panel (retry, dead panel, panel already on, regs reading
+all ones). They do not prove the sequence works on real silicon.

@@ -1,5 +1,6 @@
 #include "../include/int_vbt.h"
 #include "../include/int_mem.h"
+#include "../include/int_edp.h"
 #include <efiprot.h>
 
 #define S(x)  _INT_RepStr(R, (const CHAR8*)(x))
@@ -55,6 +56,12 @@ static EFI_PCI_IO_PROTOCOL* FindIgpu(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHand
     }
     _INT_FreePool(BS, Handles);
     return Found;
+}
+
+EFI_PCI_IO_PROTOCOL* _INT_FindIgpu(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                   UINT32* IdOut, EFI_STATUS* StOut)
+{
+    return FindIgpu(BS, ImageHandle, IdOut, StOut);
 }
 
 EFI_STATUS _INT_InspectIgpuOpRegion(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
@@ -280,13 +287,11 @@ EFI_STATUS _INT_ReadEspFile(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 #define OPREGION_VBT_OFF   0x400
 #define OPREGION_VBT_MAX   0x1800
 
-EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
-                          CHAR16* Name, _INT_Rep* R)
+static EFI_STATUS InjectBuf(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                            const UINT8* v, UINTN Size, _INT_Rep* R)
 {
     EFI_STATUS Status;
     UINT32 Id = 0;
-    VOID* Data = NULL;
-    UINTN Size = 0;
 
     EFI_PCI_IO_PROTOCOL* Igpu = FindIgpu(BS, ImageHandle, &Id, &Status);
     if (!Igpu) {
@@ -328,16 +333,8 @@ EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
         }
     }
 
-    Status = _INT_ReadEspFile(BS, ImageHandle, Name, &Data, &Size);
-    if (EFI_ERROR(Status)) {
-        S("Inject: cannot read VBT file from ESP, status=0x"); HX(Status, 16); NL();
-        return Status;
-    }
-
-    UINT8* v = (UINT8*)Data;
     if (Size < 48 || !IsVbt(v)) {
-        S("Inject: file is not a VBT (no $VBT signature)"); NL();
-        _INT_FreePool(BS, Data);
+        S("Inject: data is not a VBT (no $VBT signature)"); NL();
         return EFI_COMPROMISED_DATA;
     }
 
@@ -347,7 +344,6 @@ EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
     if (room > OPREGION_VBT_MAX) room = OPREGION_VBT_MAX;
     if (vsz > room) {
         S("Inject: VBT is "); DC(vsz); S(" bytes, mailbox only has "); DC(room); NL();
-        _INT_FreePool(BS, Data);
         return EFI_BUFFER_TOO_SMALL;
     }
 
@@ -363,8 +359,29 @@ EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
     S("Inject: wrote "); DC(vsz); S(" bytes at OpRegion+0x400, readback ");
     S(ok ? "OK" : "MISMATCH (write did not stick)"); NL();
 
-    _INT_FreePool(BS, Data);
     return ok ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+}
+
+// VBT file from the ESP root (override; used verbatim).
+EFI_STATUS _INT_InjectVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                          CHAR16* Name, _INT_Rep* R)
+{
+    VOID* Data = NULL;
+    UINTN Size = 0;
+    EFI_STATUS Status = _INT_ReadEspFile(BS, ImageHandle, Name, &Data, &Size);
+    if (EFI_ERROR(Status)) {
+        S("Inject: cannot read VBT file from ESP, status=0x"); HX(Status, 16); NL();
+        return Status;
+    }
+    Status = InjectBuf(BS, ImageHandle, (const UINT8*)Data, Size, R);
+    _INT_FreePool(BS, Data);
+    return Status;
+}
+
+// VBT built into the loader (lib/vbt_base.c); panel specifics are patched in afterwards.
+EFI_STATUS _INT_InjectVbtBuiltin(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_Rep* R)
+{
+    return InjectBuf(BS, ImageHandle, _INT_VbtBase, _INT_VbtBaseSize, R);
 }
 
 // DDI A max lane count, as i915 sees it on display gen < 11 (T2 Macs with gmux are
@@ -616,6 +633,9 @@ static const UINT8* FindFirmwareEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHand
     return NULL;
 }
 
+static EFI_STATUS ApplyEdidToVbt(UINT8* v, const UINT8* edid, UINTN EdidSize,
+                                 const char* Src, _INT_Rep* R);
+
 EFI_STATUS _INT_VbtApplyFirmwareEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                                      _INT_Rep* R)
 {
@@ -640,6 +660,12 @@ EFI_STATUS _INT_VbtApplyFirmwareEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHand
         return EFI_NOT_FOUND;
     }
 
+    return ApplyEdidToVbt(v, edid, EdidSize, Src, R);
+}
+
+static EFI_STATUS ApplyEdidToVbt(UINT8* v, const UINT8* edid, UINTN EdidSize,
+                                 const char* Src, _INT_Rep* R)
+{
     UINTN vsz = _INT_Rd16(v + 24);
     UINTN bdb = _INT_Rd32(v + 28);
     if (vsz < 64 || vsz > OPREGION_VBT_MAX || bdb + 22 > vsz) {
@@ -695,4 +721,61 @@ EFI_STATUS _INT_VbtApplyFirmwareEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHand
     S(": "); DC(hact); S("x"); DC(vact); S(", clock "); DC(oldclk * 10); S(" -> "); DC(newclk * 10);
     S(" kHz, readback "); S(ok ? "OK" : "MISMATCH"); NL();
     return ok ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+}
+// ---------------------------------------------------------------------------
+// Mailbox 4 helpers for the built-in VBT path
+// ---------------------------------------------------------------------------
+static UINT8* MailboxVbt(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, BOOLEAN NeedVbt,
+                         UINTN* RoomOut, _INT_Rep* R)
+{
+    EFI_STATUS Status;
+    UINT32 Id = 0, asls = 0;
+    EFI_PCI_IO_PROTOCOL* Igpu = FindIgpu(BS, ImageHandle, &Id, &Status);
+    if (!Igpu) { S("VBT: no Intel iGPU found"); NL(); return NULL; }
+    Igpu->Pci.Read(Igpu, EfiPciIoWidthUint32, IGPU_PCI_ASLS, 1, &asls);
+    if (asls == 0 || asls == 0xFFFFFFFF) { S("VBT: no OpRegion"); NL(); return NULL; }
+    UINT8* op = (UINT8*)(UINTN)asls;
+    UINTN opsize = (UINTN)_INT_Rd32(op + 16) * 1024;
+    if (opsize < OPREGION_VBT_OFF + 0x100) { S("VBT: OpRegion too small"); NL(); return NULL; }
+    UINTN room = opsize - OPREGION_VBT_OFF;
+    if (room > OPREGION_VBT_MAX) room = OPREGION_VBT_MAX;
+    *RoomOut = room;
+    UINT8* v = op + OPREGION_VBT_OFF;
+    if (NeedVbt && !IsVbt(v)) { S("VBT: no VBT in mailbox 4 (inject first)"); NL(); return NULL; }
+    return v;
+}
+
+EFI_STATUS _INT_VbtApplyEdidBuf(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                const UINT8* Edid, UINTN Size, const char* Src, _INT_Rep* R)
+{
+    UINTN room = 0;
+    UINT8* v = MailboxVbt(BS, ImageHandle, TRUE, &room, R);
+    if (!v) return EFI_NOT_FOUND;
+    return ApplyEdidToVbt(v, Edid, Size, Src, R);
+}
+
+EFI_STATUS _INT_VbtApplyDpcd(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                             const _INT_EdpCaps* C, _INT_Rep* R)
+{
+    UINTN room = 0;
+    UINT8* v = MailboxVbt(BS, ImageHandle, TRUE, &room, R);
+    if (!v) return EFI_NOT_FOUND;
+    if (!C->Valid) { S("VBT link: no DPCD data, built-in defaults kept"); NL(); return EFI_NOT_READY; }
+    UINTN vsz = _INT_Rd16(v + 24);
+    if (!_INT_VbtSetLink(v, vsz < room ? vsz : room, C->VbtRate, C->VbtLanes,
+                         C->PsrSupport != 0, R)) {
+        S("VBT link: patch failed (unexpected VBT layout)"); NL();
+        return EFI_COMPROMISED_DATA;
+    }
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS _INT_VbtClearMailbox(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_Rep* R)
+{
+    UINTN room = 0;
+    UINT8* v = MailboxVbt(BS, ImageHandle, FALSE, &room, R);
+    if (!v) return EFI_NOT_FOUND;
+    for (UINTN i = 0; i < room; i++) v[i] = 0;
+    S("VBT: mailbox 4 cleared again"); NL();
+    return EFI_SUCCESS;
 }

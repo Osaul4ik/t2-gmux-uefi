@@ -6,6 +6,7 @@
 #include "include/int_dpath.h"
 #include "include/pci_db.h"
 #include "include/int_vbt.h"
+#include "include/int_edp.h"
 #include "include/int_mem.h"
 #include "include/int_acpi.h"
 
@@ -580,18 +581,12 @@ ModeAvailable(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, const CHA
             return FALSE;
         }
     } else if (Mode == MODE_INTEL) {
-        BOOLEAN NoAcpi = !EspFileExists(BS, Image, ACPI_FILE_BASE);
-        BOOLEAN NoVbt = !EspFileExists(BS, Image, VBT_FILE);
-
-        if (NoAcpi && NoVbt)
-            *Msg = L"mode 4 unavailable: SSDT_IGPU.aml and t2gmux_vbt.bin not found";
-        else if (NoAcpi)
+        // t2gmux_vbt.bin is optional now: without it the built-in VBT is used and
+        // completed from the panel itself (DPCD / EDID over the iGPU's AUX channel).
+        if (!EspFileExists(BS, Image, ACPI_FILE_BASE)) {
             *Msg = L"mode 4 unavailable: SSDT_IGPU.aml not found";
-        else if (NoVbt)
-            *Msg = L"mode 4 unavailable: t2gmux_vbt.bin not found";
-        else
-            return TRUE;
-        return FALSE;
+            return FALSE;
+        }
     }
     return TRUE;
 }
@@ -1184,18 +1179,54 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         EFI_STATUS LS = EFI_OUT_OF_RESOURCES;
         EFI_STATUS AS = EFI_OUT_OF_RESOURCES;
         EFI_STATUS ES = EFI_NOT_FOUND;
+        EFI_STATUS DS = EFI_NOT_READY;
+        BOOLEAN UsedBuiltin = FALSE;
+        BOOLEAN EdidFromAux = FALSE;
+        BOOLEAN Skip4Lanes = FALSE;
+        _INT_EdpCaps Caps;
+        for (UINTN k = 0; k < sizeof(Caps); k++)
+            ((UINT8 *)&Caps)[k] = 0;
         if (RBuf != NULL) {
             _INT_Rep IR;
             _INT_RepInit(&IR, RBuf, RCap);
             if (DoVbt) {
-                IS = _INT_InjectVbt(BS, ImageHandle, VBT_FILE, &IR);
-                // Apple's EFI only has panel data for the dGPU: put its EDID timing into the iGPU VBT.
-                if (!EFI_ERROR(IS))
+                // The iGPU trains the link itself, so ask the panel what it can do: DPCD
+                // (rate / lanes / PSR) and EDID over the iGPU's own AUX-A channel.
+                _INT_EdpProbe(BS, ImageHandle, &Caps, &IR);
+
+                if (EspFileExists(BS, ImageHandle, VBT_FILE)) {
+                    // A hand-made VBT on the ESP still wins and is used as it is.
+                    IS = _INT_InjectVbt(BS, ImageHandle, VBT_FILE, &IR);
+                } else {
+                    UsedBuiltin = TRUE;
+                    IS = _INT_InjectVbtBuiltin(BS, ImageHandle, &IR);
+                    if (!EFI_ERROR(IS))
+                        DS = _INT_VbtApplyDpcd(BS, ImageHandle, &Caps, &IR);
+                }
+                // Apple's EFI only has panel data for the dGPU: put its EDID timing into the iGPU VBT;
+                // if it has none, take the EDID the panel itself returned over AUX.
+                if (!EFI_ERROR(IS)) {
                     ES = _INT_VbtApplyFirmwareEdid(BS, ImageHandle, &IR);
+                    if (EFI_ERROR(ES) && Caps.HasEdid) {
+                        ES = _INT_VbtApplyEdidBuf(BS, ImageHandle, Caps.Edid, 128,
+                                                  "panel EDID over AUX", &IR);
+                        EdidFromAux = !EFI_ERROR(ES);
+                    }
+                    // The built-in VBT only has a placeholder timing: without a real EDID the
+                    // driver would get a wrong panel, so leave the mailbox empty as before.
+                    if (UsedBuiltin && EFI_ERROR(ES)) {
+                        _INT_VbtClearMailbox(BS, ImageHandle, &IR);
+                        IS = EFI_NOT_READY;
+                    }
+                }
             }
             // Same iGPU-side setup the firmware does when it boots from the iGPU
             // (see _INT_IgpuForceDdiA4Lanes); the mux alone does not provide it.
-            LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
+            // A panel that reports fewer than 4 lanes must not get the 4-lane strap.
+            if (Caps.Valid && Caps.VbtLanes != 3)
+                Skip4Lanes = TRUE;
+            else
+                LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
             // ACPI patch (brightness via gmux) from the ESP root: mode 3 = SSDT_IGPU_VBT.aml
             // (VBT inside the SSDT), mode 4 = SSDT_IGPU.aml (VBT injected separately above).
             if (DoAcpi)
@@ -1208,12 +1239,18 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             _INT_FreePool(BS, RBuf);
         }
         if (DoVbt) {
-            LOG(&gs, PR_VBT, L"VBT inject: %s (%lX), EDID from dGPU: %s", EFI_ERROR(IS) ? L"FAILED" : L"OK", IS,
-                EFI_ERROR(ES) ? L"not applied" : L"applied");
+            LOG(&gs, PR_VBT, L"VBT %s (%lX): %s, link %s, EDID %s",
+                EFI_ERROR(IS) ? L"FAILED" : L"OK", IS,
+                UsedBuiltin ? L"built-in" : L"ESP file",
+                !UsedBuiltin ? L"as in file" : (EFI_ERROR(DS) ? L"default 4xHBR2 (probe failed)" : L"from panel DPCD"),
+                EFI_ERROR(ES) ? L"not applied" : (EdidFromAux ? L"from panel" : L"from dGPU"));
         } else {
             LOG(&gs, PR_VBT, L"VBT inject: skipped (mode %s)", L"3");
         }
-        LOG(&gs, PR_DDI, L"DDI A 4 lanes: %s (%lX)", EFI_ERROR(LS) ? L"FAILED" : L"OK", LS);
+        if (Skip4Lanes)
+            LOG(&gs, PR_DDI, L"DDI A 4 lanes: skipped (panel reports %lX lane(s))", (UINTN)Caps.MaxLanes);
+        else
+            LOG(&gs, PR_DDI, L"DDI A 4 lanes: %s (%lX)", EFI_ERROR(LS) ? L"FAILED" : L"OK", LS);
         if (DoAcpi) {
             LOG(&gs, PR_ACPI, L"ACPI patch %s: %s (%lX)",
                 DoVbt ? L"SSDT_IGPU.aml" : L"SSDT_IGPU_VBT.aml",
