@@ -520,6 +520,8 @@ static CHAR16 *MenuText[MENU_ITEMS] = {
     L"[5] Integrated gfx + built-in VBT, Radeon ON: brightness ACPI",
     L"[6] Advanced Menu: switch GPU power preference (NVRAM)",
 };
+// mode 5 while gpu-power-prefs does not hold the iGPU value: shown, but cannot be started
+static CHAR16 *MenuText5Inactive = L"[5] Integrated gfx, Radeon ON - inactive: Switch to iGPU";
 
 static CHAR16 *MenuName[MODE_COUNT] = {
     L"1 - Standard Boot",
@@ -598,7 +600,7 @@ EspFileExists(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, const CHAR16 *Name)
 
 // TRUE if the mode can start. Otherwise *Msg points to the reason (shown in the status line).
 static BOOLEAN
-ModeAvailable(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, const CHAR16 **Msg)
+ModeAvailable(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, BOOLEAN IGpuPref, const CHAR16 **Msg)
 {
     if (Mode == MODE_MUX_LANES_PATCH) {
         if (!EspFileExists(BS, Image, ACPI_FILE_FULL)) {
@@ -613,6 +615,11 @@ ModeAvailable(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, const CHA
             return FALSE;
         }
     } else if (Mode == MODE_INTEL_DGPU_ON) {
+        // mode 5 is only active while gpu-power-prefs holds the iGPU value (Advanced Menu)
+        if (!IGpuPref) {
+            *Msg = L"mode 5 inactive: Switch to iGPU first (Advanced Menu)";
+            return FALSE;
+        }
         if (!EspFileExists(BS, Image, ACPI_FILE_BRT)) {
             *Msg = L"mode 5 unavailable: SSDT_IGPU_BRT.aml not found";
             return FALSE;
@@ -708,11 +715,12 @@ UiDrawFrame(_INT_SimpleTextGraphicsStruct *gs)
 }
 
 static VOID
-MenuDraw(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel, BOOT_MODE Def)
+MenuDraw(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel, BOOT_MODE Def, BOOLEAN Mode5Active)
 {
     for (UINTN m = 0; m < MENU_ITEMS; m++) {
+        BOOLEAN Off = (m == (UINTN)MODE_INTEL_DGPU_ON && !Mode5Active);
         UI_PRINT(gs, MenuRowOf(m), L"%s%s %s", (m == (UINTN)Sel) ? L">" : L" ",
-                 (m == (UINTN)Def) ? L"x" : L" ", MenuText[m]);
+                 (m == (UINTN)Def) ? L"x" : L" ", Off ? MenuText5Inactive : MenuText[m]);
     }
     // separators: plain text, no marker, never highlighted (Sel is always an entry)
     UI_PRINT(gs, MENU_SEP_ROW, L"   " MENU_SEP_TEXT);
@@ -754,7 +762,8 @@ MenuRefresh(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel)
 //   Switch to iGPU = write 01 00 00 00      Switch to dGPU = delete the variable
 // The entry that would change nothing is hidden: variable present -> only "Switch to dGPU",
 // variable absent -> only "Switch to iGPU". If the read itself fails, both are shown.
-// The change is read by the firmware at the next boot, so it needs a restart.
+// The change is read by the firmware at the next boot, so after a successful switch the loader
+// reboots the Mac by itself. The menu also has a plain Reboot entry.
 #define GPU_PREFS_NAME  L"gpu-power-prefs"
 #define GPU_PREFS_ATTR  0x07            // NON_VOLATILE | BOOTSERVICE_ACCESS | RUNTIME_ACCESS, as macOS writes it
 static EFI_GUID GpuPrefsGuid = { 0xfa4ce28d, 0xb62f, 0x4c99, { 0x9c, 0xc3, 0x68, 0x15, 0x68, 0x6e, 0x30, 0xf9 } };
@@ -788,6 +797,28 @@ GpuPrefsRead(EFI_RUNTIME_SERVICES *RT, GPU_PREFS *P)
     }
 }
 
+// TRUE only if the variable is there and holds the iGPU value (first byte 01). An unreadable
+// variable counts as "not confirmed", so mode 5 stays inactive then.
+static BOOLEAN
+GpuPrefsIsIGpu(EFI_RUNTIME_SERVICES *RT)
+{
+    GPU_PREFS P;
+
+    GpuPrefsRead(RT, &P);
+    return (P.Known && P.Present && P.Size >= 1 && P.Data[0] == 0x01) ? TRUE : FALSE;
+}
+
+// Up/Down step over the entries, skipping mode 5 while it is inactive. Step = 1 (down)
+// or MENU_ITEMS - 1 (up).
+static UINTN
+MenuStep(UINTN Sel, UINTN Step, BOOLEAN Mode5Active)
+{
+    do {
+        Sel = (Sel + Step) % MENU_ITEMS;
+    } while (!Mode5Active && Sel == (UINTN)MODE_INTEL_DGPU_ON);
+    return Sel;
+}
+
 // Write the value (iGPU) or delete the variable (dGPU), then read it back.
 static EFI_STATUS
 GpuPrefsApply(EFI_RUNTIME_SERVICES *RT, BOOLEAN ToIGpu)
@@ -812,18 +843,29 @@ GpuPrefsApply(EFI_RUNTIME_SERVICES *RT, BOOLEAN ToIGpu)
     return (P.Known && !P.Present) ? EFI_SUCCESS : EFI_DEVICE_ERROR;
 }
 
-typedef enum { ADV_TO_DGPU = 0, ADV_TO_IGPU, ADV_BACK } ADV_ITEM;
-static CHAR16 *AdvText[3] = {
-    L"Switch to dGPU (delete gpu-power-prefs)",
-    L"Switch to iGPU (set gpu-power-prefs)",
+typedef enum { ADV_TO_DGPU = 0, ADV_TO_IGPU, ADV_REBOOT, ADV_BACK } ADV_ITEM;
+static CHAR16 *AdvText[4] = {
+    L"Switch to dGPU (delete gpu-power-prefs) + reboot",
+    L"Switch to iGPU (set gpu-power-prefs) + reboot",
+    L"Reboot",
     L"Back",
 };
+
+// Cold reset through the runtime services. Does not return on success; if it does return,
+// the caller shows an error and stays in the menu.
+static EFI_STATUS
+RebootNow(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT)
+{
+    BS->Stall(1500000);                 // 1.5 s: the status line stays readable
+    RT->ResetSystem(EfiResetCold, EFI_SUCCESS, 0, NULL);
+    return EFI_DEVICE_ERROR;
+}
 
 static VOID
 AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTERFACE *ConIn,
              _INT_SimpleTextGraphicsStruct *gs)
 {
-    ADV_ITEM Items[3];
+    ADV_ITEM Items[4];
     UINTN N = 0;
     UINTN Sel = 0;
     BOOLEAN Dirty = TRUE;
@@ -839,6 +881,7 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
                 Items[N++] = ADV_TO_DGPU;       // hidden while the variable is absent
             if (!P.Known || !P.Present)
                 Items[N++] = ADV_TO_IGPU;       // hidden while the variable is present
+            Items[N++] = ADV_REBOOT;
             Items[N++] = ADV_BACK;
             if (Sel >= N)
                 Sel = N - 1;
@@ -860,7 +903,7 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
             } else {
                 UI_PRINT(gs, TIMER_ROW, L"gpu-power-prefs: set, %d byte(s)", (UINTN)P.Size);
             }
-            UI_PRINT(gs, HINT_ROW, L"Up/Down + Enter. Esc = back. A change needs a restart.");
+            UI_PRINT(gs, HINT_ROW, L"Up/Down + Enter. Esc = back. A GPU switch reboots the Mac.");
             UiRefreshHighlight(gs, MENU_ROW + Sel);
             Dirty = FALSE;
         }
@@ -891,14 +934,27 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
             } else if (c == 0x0D || c == 0x0A || c == L' ') {   // Enter / Space
                 if (Items[Sel] == ADV_BACK) {
                     Done = TRUE;
+                } else if (Items[Sel] == ADV_REBOOT) {
+                    EFI_STATUS RSt;
+
+                    UI_STATUS(gs, L"rebooting...");
+                    RSt = RebootNow(BS, RT);
+                    UI_STATUS(gs, L"reboot FAILED (%lX)", RSt);   // only reached if ResetSystem returned
                 } else {
                     BOOLEAN ToIGpu = (Items[Sel] == ADV_TO_IGPU);
                     EFI_STATUS St = GpuPrefsApply(RT, ToIGpu);
 
-                    if (!EFI_ERROR(St))
-                        UI_STATUS(gs, L"%s done, restart to apply", ToIGpu ? L"Switch to iGPU" : L"Switch to dGPU");
-                    else
-                        UI_STATUS(gs, L"%s FAILED (%lX)", ToIGpu ? L"Switch to iGPU" : L"Switch to dGPU", St);
+                    if (!EFI_ERROR(St)) {
+                        // the firmware reads gpu-power-prefs at boot: reboot now to apply it
+                        EFI_STATUS RSt;
+
+                        UI_STATUS(gs, L"%s done, rebooting...", ToIGpu ? L"Switch to iGPU" : L"Switch to dGPU");
+                        RSt = RebootNow(BS, RT);
+                        UI_STATUS(gs, L"%s done, but reboot FAILED (%lX)",
+                                  ToIGpu ? L"Switch to iGPU" : L"Switch to dGPU", RSt);
+                    } else {
+                        UI_STATUS(gs, L"%s FAILED (%lX), no reboot", ToIGpu ? L"Switch to iGPU" : L"Switch to dGPU", St);
+                    }
                     Sel = 0;
                     Dirty = TRUE;                               // the hidden entry swaps
                 }
@@ -1149,6 +1205,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     // timer; if no key is pressed for COUNTDOWN_SECS the default mode is started.
     BOOT_MODE Def = DefaultLoad(BS, ImageHandle);
     BOOT_MODE Sel = Def;
+    BOOLEAN Mode5Active = GpuPrefsIsIGpu(SystemTable->RuntimeServices);   // mode 5 needs the iGPU preference
     BOOLEAN TimerOn = TRUE;
     BOOLEAN Chosen = FALSE;
     BOOLEAN Want = FALSE;       // a start was requested; Chosen only if the mode's files exist
@@ -1168,7 +1225,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             LastSec = Sec;
             Dirty = FALSE;
 
-            MenuDraw(&gs, Sel, Def);
+            MenuDraw(&gs, Sel, Def, Mode5Active);
             if (TimerOn) {
                 UI_PRINT(&gs, TIMER_ROW,
                     L"Auto-boot in %u s: [%c] default   (any key stops the timer)",
@@ -1191,10 +1248,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             CHAR16 c = Key.UnicodeChar;
 
             if (Key.ScanCode == 0x01) {                // Up
-                Sel = (BOOT_MODE)((Sel + MENU_ITEMS - 1) % MENU_ITEMS);
+                Sel = (BOOT_MODE)MenuStep(Sel, MENU_ITEMS - 1, Mode5Active);
                 TimerOn = FALSE;
             } else if (Key.ScanCode == 0x02) {         // Down
-                Sel = (BOOT_MODE)((Sel + 1) % MENU_ITEMS);
+                Sel = (BOOT_MODE)MenuStep(Sel, 1, Mode5Active);
                 TimerOn = FALSE;
             } else if (c == 0x0D || c == 0x0A || c == L' ') {   // Enter / Space
                 Want = TRUE;
@@ -1220,7 +1277,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             } else if (c == L'4' || c == L'i' || c == L'I') {
                 Sel = MODE_INTEL; Want = TRUE;
             } else if (c == L'5') {
-                Sel = MODE_INTEL_DGPU_ON; Want = TRUE;
+                if (Mode5Active) {
+                    Sel = MODE_INTEL_DGPU_ON; Want = TRUE;
+                } else {
+                    UI_STATUS(&gs, L"mode 5 inactive: Switch to iGPU first (Advanced Menu)");
+                    TimerOn = FALSE;
+                }
             } else if (c == L'6') {
                 Sel = (BOOT_MODE)MENU_ADV; Want = TRUE;
             } else {
@@ -1241,15 +1303,18 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             if ((UINTN)Sel == MENU_ADV) {
                 // not a boot mode: open the submenu, then come back to this menu
                 AdvancedMenu(BS, SystemTable->RuntimeServices, ConIn, &gs);
+                Mode5Active = GpuPrefsIsIGpu(SystemTable->RuntimeServices);   // may have changed
                 TimerOn = FALSE;
                 Dirty = TRUE;
-            } else if (ModeAvailable(BS, ImageHandle, Sel, &Why)) {
+            } else if (ModeAvailable(BS, ImageHandle, Sel, Mode5Active, &Why)) {
                 Chosen = TRUE;
             } else {
                 // refuse: stay in the menu, stop the timer, show the reason
                 TimerOn = FALSE;
                 Dirty = TRUE;
                 UI_STATUS(&gs, L"%s", Why);
+                if (Sel == MODE_INTEL_DGPU_ON && !Mode5Active)
+                    Sel = MODE_INTEL;              // do not leave the highlight on the inactive entry
             }
         }
     }
