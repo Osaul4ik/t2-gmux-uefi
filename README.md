@@ -15,20 +15,17 @@ If you find this project useful, consider buying me a coffee!
 
 ## What it does
 
-When the Mac starts, the loader shows a menu with five boot modes and an **Advanced Menu** entry. Rows of
-`*************` split them into groups; they cannot be selected. You pick one (or it picks the default after
-5 seconds), the loader prepares the GPUs and then starts the normal Windows boot loader.
+When the Mac starts, the loader shows a menu with three boot modes and an **Advanced menu** entry. A row of
+`*************************` splits them from the Advanced menu; it cannot be selected. You pick one (or it
+picks the default after 5 seconds), the loader prepares the GPUs and then starts the normal Windows boot loader.
 
 | Key | Mode | What it does |
 |-----|------|--------------|
-| **1** | Standard Boot | Clean boot without AppleSetOs or patches. Windows starts as if the loader was not there. |
-| **2** | Boot + Apple_set_os | Standard boot + the apple_set_os patch. Windows sees both GPUs (Radeon and Intel HD). |
-| **3** | Integrated gfx (**recommended**) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT (panel data) is inside the ACPI patch. |
-| **4** | Integrated gfx + built-in VBT | Same as 3, but the VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
-| | `*************` | separator, not selectable |
-| **5** | Integrated gfx + built-in VBT, Radeon ON | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate, brightness-only file: no sleep fix, sleep is left as the firmware has it. **Active only while `gpu-power-prefs` is set to the iGPU value**; otherwise it is shown as `inactive: Switch to iGPU` and cannot be started (see **Advanced Menu**). |
-| | `*************` | separator, not selectable |
-| **6** | Advanced Menu | Does not boot anything. Opens a submenu to switch the GPU power preference in NVRAM (see **Advanced Menu**). |
+| **1** | Standart Boot (Radeon only) | Clean boot without AppleSetOs or patches. Windows starts as if the loader was not there, on the Radeon. |
+| **4** | Efficient Boot (Intel only) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
+| **5** | Hybrid Boot (Intel + Radeon) | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate, brightness-only file: no sleep fix, sleep is left as the firmware has it. |
+| | `*************************` | separator, not selectable |
+| **6** | Advanced menu | Does not boot anything. Opens a submenu (see **Advanced menu**). |
 
 Modes 3 and 4 both move Windows to the Intel iGPU, but they behave differently after a graphics driver
 restart (see **What to expect**). **Mode 3 is recommended.** Mode 4 needs no hand-made VBT: the iGPU
@@ -194,42 +191,27 @@ Intel control panel: http://www.microsoft.com/store/apps/9PLFNLNT3G5G
 
 ## Use
 
-- **Up / Down + Enter** (or Space) starts the highlighted mode. The `*************` separators are skipped:
-  the highlight only moves over entries. Pressing **1**-**5** starts that mode at once, **6** opens the
-  Advanced Menu.
+- **Up / Down + Enter** (or Space) starts the highlighted mode. The `*************************` separator is
+  skipped: the highlight only moves over entries. Pressing **1**, **4** or **5** starts that mode at once,
+  **6** opens the Advanced menu.
 - If you press nothing for 5 seconds, the **default** mode starts. Any key stops the timer.
 - The default mode is marked with an **x**. Press **X** to make the highlighted mode the default (it is
   saved in `t2gmux_default.txt` on the EFI partition; delete the file to go back to mode 4). X only saves,
-  it does not start anything. The Advanced Menu cannot be the default.
+  it does not start anything. The Advanced menu cannot be the default.
 - The bottom of the screen lists the graphics cards the loader sees.
 
-## Advanced Menu
+## Advanced menu
 
-Entry **6** opens a submenu instead of booting. It edits the Apple NVRAM variable `gpu-power-prefs`
-(vendor GUID `fa4ce28d-b62f-4c99-9cc3-6815686e30f9`), the one `nvram` writes in macOS.
+Entry **6** opens a submenu instead of booting:
 
 | Entry | What it does |
 |-------|--------------|
-| Switch to iGPU | Writes `01 00 00 00`. With that value the firmware uses the Intel iGPU at the next boot. The Mac then **reboots by itself**. |
-| Switch to dGPU | Deletes the variable, back to the firmware default (the Radeon). The Mac then **reboots by itself**. |
-| Reboot | Restarts the Mac at once (cold reset), nothing else is changed. |
-| Back | Returns to the boot menu (Esc does the same). |
+| Standart Boot + Intel Secondary | Standard boot + the apple_set_os patch (mode 2). Windows sees both GPUs, the Radeon stays primary and the Intel HD is a secondary adapter. |
+| Reboot | Restarts the Mac at once (cold reset). |
+| Power off | Shuts the Mac down at once. |
 
-Only the entry that would change something is shown: if the variable exists only **Switch to dGPU**
-is listed, if it does not exist only **Switch to iGPU**. If the variable cannot be read at all, both are
-listed. A line under the entries shows the current value. Mode **5** follows the same variable: while it
-is not set to the iGPU value (first byte `01`), or cannot be read, mode 5 is shown as
-`[5] ... inactive: Switch to iGPU`, the highlight skips it, key **5** only shows a message, and the
-auto-boot default cannot start it. After **Switch to iGPU** the Mac reboots and mode 5 is active in the
-menu that follows.
-
-After a switch the status line shows the result (checked by reading the variable back). The firmware
-reads the variable at boot, so after a successful switch the loader shows the result for about a second
-and a half and reboots the Mac. If the write fails there is **no** reboot and the menu stays. If the
-reset itself fails, the status line says so.
-
-The write is done from the UEFI loader and has not been tested on hardware. To undo it, use
-**Switch to dGPU**, or reset the NVRAM of the Mac (Cmd + Option + P + R while powering on).
+Esc returns to the boot menu. If the reset or shutdown call returns, the status line shows the error and the
+menu stays.
 
 ## What to expect
 
