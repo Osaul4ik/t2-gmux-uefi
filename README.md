@@ -26,7 +26,7 @@ When the Mac starts, the loader shows a menu with five boot modes and an **Advan
 | **3** | Integrated gfx (**recommended**) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT (panel data) is inside the ACPI patch. |
 | **4** | Integrated gfx + built-in VBT | Same as 3, but the VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
 | | `*************` | separator, not selectable |
-| **5** | Integrated gfx + built-in VBT, Radeon ON | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate, brightness-only file: no sleep fix, sleep is left as the firmware has it. |
+| **5** | Integrated gfx + built-in VBT, Radeon ON | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate, brightness-only file: no sleep fix, sleep is left as the firmware has it. **Active only while `gpu-power-prefs` is set to the iGPU value**; otherwise it is shown as `inactive: Switch to iGPU` and cannot be started (see **Advanced Menu**). |
 | | `*************` | separator, not selectable |
 | **6** | Advanced Menu | Does not boot anything. Opens a submenu to switch the GPU power preference in NVRAM (see **Advanced Menu**). |
 
@@ -210,15 +210,23 @@ Entry **6** opens a submenu instead of booting. It edits the Apple NVRAM variabl
 
 | Entry | What it does |
 |-------|--------------|
-| Switch to iGPU | Writes `01 00 00 00`. With that value the firmware uses the Intel iGPU at the next boot. |
-| Switch to dGPU | Deletes the variable, back to the firmware default (the Radeon). |
+| Switch to iGPU | Writes `01 00 00 00`. With that value the firmware uses the Intel iGPU at the next boot. The Mac then **reboots by itself**. |
+| Switch to dGPU | Deletes the variable, back to the firmware default (the Radeon). The Mac then **reboots by itself**. |
+| Reboot | Restarts the Mac at once (cold reset), nothing else is changed. |
 | Back | Returns to the boot menu (Esc does the same). |
 
 Only the entry that would change something is shown: if the variable exists only **Switch to dGPU**
 is listed, if it does not exist only **Switch to iGPU**. If the variable cannot be read at all, both are
-listed. A line under the entries shows the current value. After a switch the status line shows the result
-(checked by reading the variable back). The firmware reads the variable at boot, so the change needs a
-**restart**.
+listed. A line under the entries shows the current value. Mode **5** follows the same variable: while it
+is not set to the iGPU value (first byte `01`), or cannot be read, mode 5 is shown as
+`[5] ... inactive: Switch to iGPU`, the highlight skips it, key **5** only shows a message, and the
+auto-boot default cannot start it. After **Switch to iGPU** the Mac reboots and mode 5 is active in the
+menu that follows.
+
+After a switch the status line shows the result (checked by reading the variable back). The firmware
+reads the variable at boot, so after a successful switch the loader shows the result for about a second
+and a half and reboots the Mac. If the write fails there is **no** reboot and the menu stays. If the
+reset itself fails, the status line says so.
 
 The write is done from the UEFI loader and has not been tested on hardware. To undo it, use
 **Switch to dGPU**, or reset the NVRAM of the Mac (Cmd + Option + P + R while powering on).
