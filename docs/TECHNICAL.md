@@ -38,12 +38,20 @@ writes it).
 - Switch to iGPU: `SetVariable` with the 4 bytes `01 00 00 00`.
 - Switch to dGPU: `SetVariable` with size 0, which deletes the variable (an already absent variable is not
   an error).
-- Both are verified by reading the variable back; the status line shows the result.
+- Both are verified by reading the variable back; the status line shows the result. After a verified
+  success `RebootNow()` waits 1.5 s and calls `ResetSystem(EfiResetCold, ...)` so the firmware reads the new
+  value. A failed write does not reboot. The `Reboot` entry calls the same function without changing anything.
 - Visibility: variable found (`EFI_SUCCESS` or `EFI_BUFFER_TOO_SMALL`) -> only Switch to dGPU; `EFI_NOT_FOUND`
   -> only Switch to iGPU; any other read error -> both.
 
-The firmware reads the variable early at boot, so a change only applies after a restart. Nothing else is
-touched: no gmux access, no ACPI, no files. The Advanced Menu is never saved as the default mode.
+Mode 5 depends on the same variable: `GpuPrefsIsIGpu()` is true only when the variable is found and its
+first byte is `01`. The loader reads it once at start and again after returning from the Advanced Menu (a successful switch reboots anyway).
+While it is false, mode 5 is drawn as `inactive: Switch to iGPU`, `MenuStep()` skips it for Up/Down, key 5
+shows a status message, and `ModeAvailable()` refuses it (this also covers the auto-boot default; the
+highlight then moves to mode 4). An unreadable variable counts as not confirmed, so mode 5 stays inactive.
+
+The firmware reads the variable early at boot, so a change only applies after a restart; that is why a
+successful switch reboots at once. Nothing else is touched: no gmux access, no ACPI, no files. The Advanced Menu is never saved as the default mode.
 
 ## Panel data from the dGPU (EDID substitution, mode 4)
 
