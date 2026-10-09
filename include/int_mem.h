@@ -6,7 +6,6 @@
 
 VOID* _INT_AllocatePool(EFI_BOOT_SERVICES* BS, UINTN Size);
 
-VOID* _INT_ReallocatePool(EFI_BOOT_SERVICES* BS, VOID* OldPool, UINTN OldSize, UINTN NewSize);
 
 VOID _INT_FreePool(EFI_BOOT_SERVICES* BS, VOID *Buffer);
 

@@ -5,7 +5,7 @@ patch of **mode 5** of the `t2-gmux-uefi` loader. It is not a user manual. Follo
 order, and report what you actually verified.
 
 Mode 5 is mode 4 with the Radeon left powered ON, and it patches **brightness only**. Sleep is not
-touched. For the patch files of modes 3 and 4 use [ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md); do not
+touched. For the patch file of mode 4 use [ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md); do not
 mix the two guides.
 
 Reference hardware: MacBook Pro 2019 with the T2 chip (Intel iGPU + AMD Radeon, Apple gmux), Windows
@@ -20,10 +20,8 @@ that machine's own ACPI dump (section 4 and section 8).
 - Do not rename devices. The SSDT uses the firmware's own names (`IGPU`, `GFX0`).
 - Only edit `tools/SSDT_IGPU_BRT.asl`, never a generated `.aml`. Rebuild the `.aml` from the `.asl`.
 - Never overwrite `tools/SSDT_IGPU_BRT.asl` with generated output. Generate into a different directory.
-- Keep the two markers `/*VBT_EXTERNALS*/` and `/*VBT_BLOCK*/` in the `.asl`. `make_ssdt_igpu.py` stops
-  with an error if either is missing. In this build both are replaced with nothing.
-- **Never build this file with `--vbt`.** Mode 5 takes its VBT from the loader (UEFI route). A VBT inside
-  the SSDT would overwrite it, together with the panel timing the loader took from the panel.
+- **Never put a VBT into this SSDT** (no `IGPU._INI`). Mode 5 takes its VBT from the loader (UEFI route). A VBT
+  written by AML would overwrite it, together with the panel timing the loader took from the panel.
 - **Do not add sleep code.** No `_PTS`, no `_WAK`, no `XPTS`, no `XWAK`, no gmux MMIO window. See section 6.
 
 ## 1. Mode 5 and the file it needs
@@ -60,9 +58,9 @@ generator. Check with `which iasl`.
 Repo files you need (all under `tools/`):
 
 - `SSDT_IGPU_BRT.asl`: the source of this patch.
-- `make_ssdt_igpu.py`: compiles it with `iasl` (called with `--asl`, without `--vbt`).
+- `make_ssdt_igpu.py`: compiles it with `iasl` (called with `--asl`).
 
-You do **not** need `make_vbt.py`, the VBT template or an EDID for this file.
+You do **not** need an EDID or any VBT file for this file.
 
 ## 4. Get the ACPI tables
 
@@ -122,10 +120,10 @@ Add matching `External (...)` lines at the top of the definition block for every
 | `_PTS`, `_WAK`, and the names `XPTS`, `XWAK` | Sleep is not touched in mode 5. The loader renames the DSDT `_PTS` / `_WAK` only for an SSDT that mentions `XPTS` / `XWAK`, so these names must not appear in the compiled AML, not even as an `External (...)` line (`iasl` writes the name of an external into the AML). Mentioning them in an `.asl` comment is harmless. |
 | `OperationRegion (T2GR ...)` at `0xFE0B0200`, `T2OF`, `T2RD` | Only used by the sleep code. |
 | `External` for `GFX0.CSTS`, `GFX0.GVEN`, `GFX0.MBWR`, `BRTL` | Only used by the sleep code. |
-| `T2VB` buffer and `IGPU._INI` | That is the VBT-in-SSDT route of mode 3. Mode 5 gets its VBT from UEFI. |
+| `T2VB` buffer and `IGPU._INI` | A VBT written from AML would overwrite the one the loader injects. Mode 5 gets its VBT from UEFI. |
 
 Consequence to tell the user: with this patch the sleep / resume path is the firmware's own. The existing
-guide ([ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md), section 5.2) describes why modes 3 / 4 re-route gmux after
+guide ([ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md), section 5.2) describes why mode 4 re-routes gmux after
 resume; mode 5 does not, so after sleep the panel may stay dark. Do not claim otherwise and do not add the
 sleep code on your own.
 
@@ -179,6 +177,5 @@ drive: confirm what the machine actually has before building anything.
 - Mixing up the files. `SSDT_IGPU.aml` copied to `SSDT_IGPU_BRT.aml` makes mode 5 apply the sleep patch
   (the loader sees `XWAK` / `XPTS` and renames the DSDT methods) and the gmux MMIO window. Check with the
   counts in section 7. `SSDT_IGPU_BRT.aml` copied to `SSDT_IGPU.aml` makes mode 4 lose its sleep fix.
-- Building the `.asl` with `--vbt`: `_INI` appears and the VBT injected by the loader is overwritten.
-- Removing the markers from the `.asl` makes the generator stop. Keep them.
+- Adding `IGPU._INI` / a VBT buffer to the `.asl`: the VBT injected by the loader is overwritten.
 - Do not write `iasl` output files into `tools/`, and do not point `-o` into `tools/`.

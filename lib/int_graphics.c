@@ -83,19 +83,6 @@ VOID _INT_SimpleTextGraphicsInit(_INT_SimpleTextGraphicsStruct* gs)
     }
 }
 
-VOID _INT_SimpleTextGraphicsDeinit(_INT_SimpleTextGraphicsStruct* gs)
-{
-    if (gs->buf != NULL) {
-        for (UINTN i = 0; i < gs->row; i++) {
-            _INT_FreePool(gs->BS, gs->buf[i]);
-        }
-
-        _INT_FreePool(gs->BS, gs->buf);
-
-        gs->buf = NULL;
-    }
-}
-
 VOID _INT_SimpleTextGraphicsPrint(
     _INT_SimpleTextGraphicsStruct* gs,
     UINTN col,

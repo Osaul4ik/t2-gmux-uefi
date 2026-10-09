@@ -1,13 +1,11 @@
 /*
  * SSDT_IGPU.asl - ACPI patch for the t2-gmux-uefi loader (MacBook Pro with T2, Intel iGPU + AMD Radeon).
  *
- * One source, two builds (see docs/ACPI_PATCH_GUIDE.md, sections 6 and 7):
- *   python tools/make_ssdt_igpu.py                       -o SSDT_IGPU.aml      mode 4, no VBT inside
- *   python tools/make_ssdt_igpu.py --vbt t2gmux_vbt.bin  -o SSDT_IGPU_VBT.aml  mode 3, VBT inside
+ * Build (see docs/ACPI_PATCH_GUIDE.md, section 7):
+ *   python tools/make_ssdt_igpu.py -o SSDT_IGPU.aml      mode 4
  *
- * Edit only this file, never a generated .aml. Keep the two markers below: the generator
- * replaces them (with nothing in the plain build, with the VBT buffer and IGPU._INI in the
- * --vbt build) and stops with an error if either is missing.
+ * Edit only this file, never a generated .aml. This table carries no VBT: the loader injects
+ * the VBT from UEFI, and AML must not overwrite it.
  *
  * The loader does the renames, not this file:
  *   SaSsdt  _BCM -> XBCM   (always)
@@ -29,7 +27,6 @@ DefinitionBlock ("", "SSDT", 2, "T2GMUX", "IGPUBCM", 0x00002000)
     External (BRTL, FieldUnitObj)                                   // current brightness
     External (XPTS, MethodObj)                                      // 1 Arg, renamed DSDT _PTS
     External (XWAK, MethodObj)                                      // 1 Arg, renamed DSDT _WAK
-    /*VBT_EXTERNALS*/
 
     // Brightness: keep the Intel side, drive gmux as well.
     Scope (\_SB.PCI0.IGPU.DD1F)
@@ -115,6 +112,4 @@ DefinitionBlock ("", "SSDT", 2, "T2GMUX", "IGPUBCM", 0x00002000)
 
         Return (Local0)
     }
-
-    /*VBT_BLOCK*/
 }

@@ -1,7 +1,7 @@
-# Instructions for Claude: generate the ACPI patch (brightness, sleep, VBT)
+# Instructions for Claude: generate the ACPI patch (brightness, sleep)
 
 This file is written for Claude (or any AI agent) that is asked to build the ACPI patch files
-`SSDT_IGPU.aml` and `SSDT_IGPU_VBT.aml` for the `t2-gmux-uefi` loader in this repository. It is not a
+`SSDT_IGPU.aml` (mode 4, Efficient Boot) for the `t2-gmux-uefi` loader in this repository. It is not a
 user manual. Follow it as a procedure, in order, and report what you actually verified.
 
 Reference hardware: MacBook Pro 2019 with the T2 chip (Intel iGPU + AMD Radeon, Apple gmux), Windows
@@ -15,41 +15,36 @@ machine's own ACPI dump (section 8).
 - Do not invent ACPI paths, method names or addresses. Read them from the dumped tables.
 - Do not rename devices. The SSDT uses the firmware's own names (`IGPU`, `GFX0`). The loader does not
   rename GPU devices.
-- Only edit `tools/SSDT_IGPU.asl`, never a generated `.aml`. Rebuild the `.aml` files from the `.asl`.
+- Only edit `tools/SSDT_IGPU.asl`, never a generated `.aml`. Rebuild the `.aml` from the `.asl`.
 - Never overwrite `tools/SSDT_IGPU.asl` with generated output. Generate into a different directory
   or file name.
-- Keep the two markers `/*VBT_EXTERNALS*/` and `/*VBT_BLOCK*/` in the `.asl`. `make_ssdt_igpu.py` stops
-  with an error if either is missing.
-- If an input is missing (EDID, VBT, template), ask the user for it or find it yourself in the repo.
-  Do not fabricate binary data.
-- Two different files exist and they are not interchangeable. Never copy one under the other's name
-  (section 6).
+- If an input is missing (an ACPI dump), ask the user for it. Do not fabricate binary data.
+- `SSDT_IGPU.aml` (mode 4) and `SSDT_IGPU_BRT.aml` (mode 5) are not interchangeable. Never copy one
+  under the other's name.
 
 ## 1. Boot modes and the files they need
 
-The loader has five modes: 1, 4 and 5 in the main menu, 2 in the Advanced menu, 3 not in the menu (mode 5 has its own guide, see the note below the table):
+The loader has four modes: 1, 4 and 5 in the main menu and 2 in the Advanced menu:
 
 | Key | Mode | ACPI patch file (ESP root) | VBT |
 |-----|------|----------------------------|-----|
 | **1** | Standart Boot (Radeon only) | none | none |
 | **2** | Standart Boot + Intel Secondary (Advanced menu) | none | none |
-| **3** | Integrated gfx | `\SSDT_IGPU_VBT.aml` | inside the SSDT (built with `--vbt`) |
-| **4** | Efficient Boot (Intel only), built-in VBT | `\SSDT_IGPU.aml` | built into the loader, completed from the panel (DPCD / EDID), injected from UEFI; no file |
-| **5** | Hybrid Boot (Intel + Radeon), built-in VBT | `\SSDT_IGPU_BRT.aml` | as mode 4 |
+| **4** | Efficient Boot (Intel only) | `\SSDT_IGPU.aml` | built into the loader, completed from the panel (DPCD / EDID), injected from UEFI; no file |
+| **5** | Hybrid Boot (Intel + Radeon) | `\SSDT_IGPU_BRT.aml` | as mode 4 |
 
 Mode **5** is mode 4 with the Radeon left ON and a brightness-only SSDT (no sleep fix). Its patch file is
 built from `tools/SSDT_IGPU_BRT.asl` and has its own procedure: [ACPI_PATCH_GUIDE_MODE5.md](ACPI_PATCH_GUIDE_MODE5.md).
-Everything below in this file is about modes 3 and 4.
+Everything below in this file is about mode 4.
 
 A mode whose files are missing cannot be started. The menu stays, the timer stops and the status line
-names the missing file (for mode 3 `SSDT_IGPU_VBT.aml`; for mode 4 `SSDT_IGPU.aml`). This also applies to the auto-boot default.
+names the missing file (`SSDT_IGPU.aml` for mode 4). This also applies to the auto-boot default.
 
 Modes **1** and **2** never load an SSDT.
 
 ## 2. How the loader uses the SSDT (what you are plugging into)
 
-In modes **3** and **4** the loader does this in memory before Windows starts, with the SSDT file of
-that mode:
+In mode **4** the loader does this in memory before Windows starts:
 
 1. In the firmware table `SaSsdt` it renames the only `_BCM` to `XBCM` (it refuses to patch if there
    is not exactly one `_BCM`).
@@ -63,8 +58,7 @@ So your SSDT must define **new** `_BCM`, `_PTS`, `_WAK` that call the renamed or
 `_WAK` / `_PTS`, and your SSDT must not define them. The renames are done by the loader, never
 by the AML.
 
-Mode **3** does not inject a VBT from UEFI: its VBT comes from `SSDT_IGPU_VBT.aml`. Mode **4**
-injects its built-in VBT from UEFI (link from the panel DPCD, timing from the EDID); its SSDT
+Mode **4** injects its built-in VBT from UEFI (link from the panel DPCD, timing from the EDID); its SSDT
 (`SSDT_IGPU.aml`) carries no VBT.
 
 ## 3. Prerequisites
@@ -74,12 +68,8 @@ the generator. Check with `which iasl`.
 
 Repo files you need (all under `tools/`):
 
-- `SSDT_IGPU.asl`: the source (one source, two builds, see section 7).
-- `make_ssdt_igpu.py`: compiles it with `iasl`, optionally embedding a VBT.
-- `make_vbt.py` + `template/coreboot_google_sarien_data.vbt`: builds the VBT. If the template is 0 bytes
-  (it is binary and gets lost in some archives), get it from the repository or from coreboot
-  (board `google/sarien`). Do not continue with an empty template.
-- `get_edid.ps1`: the user runs it on Windows to get `edid_N.bin`.
+- `SSDT_IGPU.asl`: the source.
+- `make_ssdt_igpu.py`: compiles it with `iasl`.
 
 ## 4. Get the ACPI tables
 
@@ -99,10 +89,9 @@ Windows: `acpidump` from ACPICA gives the same tables. Disassemble with `iasl -d
 
 You now work from `dsdt.dsl` and `sassdt.dsl`. Read them with `grep` / `view`, do not guess.
 
-## 5. Brightness and sleep patch (both SSDT files)
+## 5. Brightness and sleep patch
 
-Both `SSDT_IGPU.aml` and `SSDT_IGPU_VBT.aml` contain the same brightness and sleep code. They differ
-only in the VBT block (section 6).
+`SSDT_IGPU.aml` carries the brightness patch (5.1) and the sleep patch (5.2).
 
 ### 5.1 Brightness (`_BCM`)
 
@@ -164,82 +153,41 @@ Rules:
   `GFX0.CSTS` and read `GFX0.GVEN` unguarded, which is fine on the reference machine and breaks on a
   machine without that device. Add guards when you adapt it.
 
-## 6. VBT: two files, two delivery routes
+## 6. VBT
 
 The T2 firmware leaves the Intel OpRegion VBT mailbox empty, so the Windows Intel driver never learns
-about the eDP panel on DDI A. The two modes deliver the VBT differently, and each needs its own SSDT:
+about the eDP panel on DDI A. In mode 4 the loader fixes that itself, from UEFI: it writes its built-in
+VBT to OpRegion+0x400, patches the link from the panel DPCD (PSR stays off) and the timing from the
+EDID (Radeon, else the panel over AUX). No VBT file and no EDID are needed from the user, and the SSDT
+carries no VBT.
 
-| | Mode 3, Integrated gfx | Mode 4, Integrated gfx + built-in VBT |
-|---|---|---|
-| SSDT file | `SSDT_IGPU_VBT.aml` | `SSDT_IGPU.aml` |
-| Built with | `--vbt t2gmux_vbt.bin` | no `--vbt` |
-| VBT delivered by | ACPI: `IGPU._INI` inside the SSDT | UEFI: built-in VBT, completed from the panel |
-| `t2gmux_vbt.bin` on the ESP | not needed (used only at build time) | not used |
-| EDID timing from the Radeon | no, the timing of the file stays | yes, written into the injected VBT |
-
-How the ACPI route (mode 3) works: the SSDT built with `--vbt` carries the VBT and `IGPU._INI` copies
-it to OpRegion+0x400 (mailbox 4, 0x1800 bytes max) while ACPI initialises, before the Intel driver
-starts.
-
-How the UEFI route (mode 4) works: the loader writes its built-in VBT to OpRegion+0x400, patches the
-link from the panel DPCD (PSR stays off) and the timing from the EDID (Radeon, else the panel over AUX).
-
-Build steps for the VBT:
-
-1. The user takes the panel EDID on Windows with `tools/get_edid.ps1`, giving `edid_N.bin`.
-   The internal panel has manufacturer `APP`.
-2. `python tools/make_vbt.py --edid edid_1.bin --lanes 4 --rate hbr2 -o t2gmux_vbt.bin`
-   If the panel stays dark the user can retry `--lanes 2` or `--rate hbr`. Do not claim a specific
-   value is right without a working result.
-
-Build steps for the two SSDT files are in section 7.
-
-What `_INI` does (generated by the script, do not hand-write it; present only in the `--vbt` build): it
-takes `ASLS` (or `ASLB`) as the OpRegion address, stops silently if that is 0 or 0xFFFFFFFF, checks the
-signature `IntelGraphicsMem` and that the OpRegion is large enough, then copies the VBT buffer to
-OpRegion+0x400. It does not touch `rvda` / `rvds`, and it leaves the OpRegion header alone: i915 takes
-the VBT from OpRegion+0x400 by its validity, there is no header flag for mailbox 4.
-
-**Never put the `--vbt` SSDT into mode 4 under the name `SSDT_IGPU.aml`.** AML runs after UEFI. It
-overwrites the VBT, and with it the EDID timing taken from the Radeon, with the file's timing. For
-mode 4 build without `--vbt`. For mode 3 build with `--vbt` and name the result `SSDT_IGPU_VBT.aml`.
+**The SSDT must never write the VBT.** AML runs after UEFI: an AML copy into OpRegion+0x400 would
+overwrite the injected VBT and the EDID timing taken from the Radeon. `SSDT_IGPU.aml` therefore must not
+contain `_INI` on the IGPU device.
 
 ## 7. Build and verify
 
-Build both files from the same `.asl`, into a directory other than `tools/`:
+Build into a directory other than `tools/`:
 
 ```
 OUT=/some/other/dir
-python tools/make_ssdt_igpu.py                         -o $OUT/SSDT_IGPU.aml       # mode 4, no VBT
-python tools/make_ssdt_igpu.py --vbt t2gmux_vbt.bin    -o $OUT/SSDT_IGPU_VBT.aml   # mode 3, VBT inside
+python tools/make_ssdt_igpu.py -o $OUT/SSDT_IGPU.aml
 iasl -d $OUT/SSDT_IGPU.aml                              # disassemble what you built
-iasl -d $OUT/SSDT_IGPU_VBT.aml
 ```
-
-Build only the file for the mode the user asked about if they did not ask for both.
 
 Check, and quote the evidence:
 
-- `iasl` printed `Compilation successful. 0 Errors` for each file. Read warnings and remarks, do not
-  hide them.
-- Both disassemblies contain `_BCM`, `_PTS` and `_WAK`. `_INI` appears **only** in
-  `SSDT_IGPU_VBT.aml` and **not** in `SSDT_IGPU.aml`. If `SSDT_IGPU.aml` contains `_INI`, it was built
-  with `--vbt`: stop and rebuild.
+- `iasl` printed `Compilation successful. 0 Errors`. Read warnings and remarks, do not hide them.
+- The disassembly contains `_BCM`, `_PTS` and `_WAK`, and **no** `_INI`.
 - Every path in the `.dsl` exists in the dumps from section 4 (grep each one).
-- For `SSDT_IGPU_VBT.aml`: the `T2VB` buffer size equals the VBT size padded to 8 bytes, and the VBT
-  starts with `$VBT`.
-- The plain build (`SSDT_IGPU.aml`) was 903 bytes on the reference build.
 
-Deliver the file(s) and say plainly that they were not run on hardware. On the target the files go to
-the ESP root, named exactly as in the table in section 1:
+Deliver the file and say plainly that it was not run on hardware. On the target it goes to the ESP
+root, named exactly `\SSDT_IGPU.aml`.
 
-- mode 3: `\SSDT_IGPU_VBT.aml`
-- mode 4: `\SSDT_IGPU.aml`
-
-The loader progress screen shows `ACPI patch <file name>: ...` with the name of the file that mode
-used: `OK` = applied, `FAILED` = a check failed and the renames were reverted. A missing file is
-caught earlier: the mode cannot be started and the menu shows which file is missing. Rollback is
-deleting the files (the modes then become unavailable; use mode 1 or 2).
+The loader progress screen shows `ACPI patch SSDT_IGPU.aml: ...`: `OK` = applied, `FAILED` = a check
+failed and the renames were reverted. A missing file is caught earlier: the mode cannot be started and
+the menu shows which file is missing. Rollback is deleting the file (mode 4 then becomes unavailable;
+use mode 1 or 2).
 
 ## 8. Adapting to another machine
 
@@ -249,7 +197,6 @@ machine's dumps, and change the `.asl` where it differs:
 - Radeon device path (`PEG0.EGP0.EGP1.GFX0`) and the methods / fields `ABCM`, `CSTS`, `MBWR`, `GVEN`.
 - gmux MMIO address (`0xFE0B0200`) and the register offsets used.
 - Brightness path (`IGPU.DD1F`) and exactly one `_BCM` in the table the loader renames in.
-- The VBT: own EDID, own lane count and link rate.
 
 Do not use this patch on non-Apple machines: the MMIO address would point at unrelated registers. On
 models without a Radeon there is nothing for the gmux part to drive, so build brightness only after
@@ -259,13 +206,7 @@ confirming what the machine actually has.
 
 - `make_ssdt_igpu.py --keep-asl` writes `<out>.generated.asl`. An older version wrote `<out>.asl`, which
   overwrote the template when the output sat next to it.
-- A 0-byte VBT template makes `make_vbt.py` fail. Fix the template, do not work around it.
 - In `sh -c`, process substitution (`<(...)`) is a syntax error. Use `bash -c` for such commands.
 - Do not write `iasl` output files into `tools/`.
 - Do not use `SSDT_IGPU.aml` as `SSDT_IGPU_BRT.aml` (mode 5): it carries the sleep patch and the gmux MMIO
   window, which mode 5 must not have.
-- Mixing up the two SSDT files: `SSDT_IGPU_VBT.aml` renamed to `SSDT_IGPU.aml` makes mode 4 overwrite
-  the injected VBT; `SSDT_IGPU.aml` used as `SSDT_IGPU_VBT.aml` makes mode 3 start with an empty VBT
-  mailbox and the panel may stay dark. Check for `_INI` as in section 7.
-- Old guide and old README used the letters D / A / H / I for the modes. They are now 1 / 2 / 3 / 4
-  (D = 1, A = 2, H = 3, I = 4).

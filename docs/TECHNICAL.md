@@ -2,10 +2,10 @@
 
 Background for the loader's behaviour. Not needed to use it; see [../README.md](../README.md).
 
-## ACPI patch (modes 3, 4)
+## ACPI patch (mode 4)
 
-Modes **3** and **4** apply an ACPI patch before Windows starts: mode 3 uses `\SSDT_IGPU_VBT.aml`,
-mode 4 uses `\SSDT_IGPU.aml` (a missing file means the mode cannot be started):
+Mode **4** applies an ACPI patch before Windows starts with `\SSDT_IGPU.aml` (a missing file means the
+mode cannot be started):
 
 1. the only `_BCM` of the firmware table `SaSsdt` (`\_SB.PCI0.IGPU.DD1F._BCM`) is renamed to `XBCM`
    in memory; if the SSDT mentions `XWAK` / `XPTS`, the `_WAK` / `_PTS` of the DSDT (found through
@@ -17,7 +17,7 @@ Checks: SSDT signature/length/checksum, exactly one `_BCM` in SaSsdt, memory wri
 later failure the renames are reverted. The result is shown on screen. The GPU device names
 (`IGPU`, `GFX0`) are **not** touched: the SSDT uses the firmware's own names.
 
-What the SSDT contains (brightness, sleep, optional VBT) and how to rebuild it:
+What the SSDT contains (brightness, sleep) and how to rebuild it:
 [ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md). The `.asl` source and the generator are in `tools/`.
 
 ### Mode 5: brightness-only patch
@@ -38,8 +38,8 @@ Menu entry 6 is not a boot mode. It opens `AdvancedMenu()` in `bootx64.c` with t
 
 Esc returns FALSE (back to the boot menu). A failed reset shows an error and keeps the menu. Nothing else is
 touched: no gmux access, no ACPI, no NVRAM variables, no files. The Advanced menu is never saved as the default
-mode. The main menu walks over `MenuOrder[]` = modes 1, 4, 5 and the Advanced entry; modes 2 and 3 are not in it
-(an old default file holding 2 or 3 falls back to mode 1 or 4). Mode 5 has no precondition any more.
+mode. The main menu walks over `MenuOrder[]` = modes 1, 4, 5 and the Advanced entry; mode 2 is not in it
+(a default file holding 2 falls back to mode 1; an unknown value falls back to mode 4).
 
 ## Panel data from the dGPU (EDID substitution, mode 4)
 
@@ -48,11 +48,11 @@ the iGPU has an empty VBT mailbox. After the built-in VBT is injected, the loade
 internal-panel EDID (EDID active protocol first, then discovered; manufacturer `APP`, valid header
 and checksum, first descriptor is a DTD) and writes its first DTD and the active size into the
 injected VBT (BDB 41 for the panel index from BDB 40), then fixes the VBT checksum. If the firmware
-exposes no such EDID, the timing from the file is kept. The screen shows `EDID from dGPU:
+exposes no such EDID, the panel EDID read over AUX is used instead. The screen shows `EDID from dGPU:
 applied / not applied`.
 
-Only the panel timing is substituted. Link rate, lanes and fast-link bits still come from the VBT
-file, because the firmware does not publish them.
+Only the panel timing is substituted. Link rate, lanes and fast-link bits come from the panel DPCD
+(see the live eDP probe section below), because the firmware does not publish them.
 
 ## Backlight in the VBT
 
@@ -61,7 +61,7 @@ file, because the firmware does not publish them.
 (port 0x74, driven through ACPI `_BCM`, see the SSDT patch above), not by an Intel PWM, so the
 Intel driver must not claim a PWM it cannot use.
 
-## What the mux/rail modes do (3, 4; mode 5 without the rail step)
+## What the mux/rail modes do (4; mode 5 without the rail step)
 
 Sequence follows Linux `apple-gmux` (T2 MMIO gmux):
 
@@ -82,35 +82,25 @@ when clearing MMIO-gmux interrupts, and the eDP link pre-calibration that
 `vga_switcheroo` flags as `NEEDS_EDP_CONFIG` for T2 gmux (the iGPU has to train
 the panel link itself, hence the VBT injection).
 
-## VBT injection and DDI A 4 lanes (modes 3, 4, 5)
+## VBT injection and DDI A 4 lanes (modes 4, 5)
 
 Apple's T2 firmware leaves the Intel OpRegion VBT mailbox empty, so the Windows Intel driver does
 not know an eDP panel sits on DDI A.
 
-Mode 4 needs no VBT file. The loader carries a VBT built from a real coreboot Whiskey Lake VBT (see
+No VBT file is needed. The loader carries a VBT built from a real coreboot Whiskey Lake VBT (see
 `tools/template/`, `tools/gen_vbt_base.py`; only the eDP child on DDI A stays enabled), completes it
 from the panel (see the live eDP probe section below) and copies it into OpRegion+0x400, then re-reads it.
-Copy `SSDT_IGPU.aml` to the ESP root and press **4** at the countdown.
+Mode 4 uses `SSDT_IGPU.aml`, mode 5 the same UEFI route with `SSDT_IGPU_BRT.aml`.
 
-(Mode 3 delivers the VBT through ACPI instead: `SSDT_IGPU_VBT.aml`, see the guide. Mode 5 uses the same
-UEFI route as mode 4, with `SSDT_IGPU_BRT.aml`.)
-
-Modes **3** and **4** also set `DDI_BUF_CTL(A).DDI_A_4_LANES` (bit 4, GTTMMADR+0x64000) in the iGPU. On
+Modes **4** and **5** also set `DDI_BUF_CTL(A).DDI_A_4_LANES` (bit 4, GTTMMADR+0x64000) in the iGPU. On
 gen < 11 i915 takes the DDI A lane limit from that bit, Apple's firmware sets it only when it lights
 the panel from the iGPU, and with the dGPU as boot GPU it stays clear - the t2linux patch
 "i915: 4 lane quirk for mbp15,1" works around exactly that. The write is skipped if BAR0 is
 unassigned or the register reads all ones.
 
-If the panel stays dark try `--lanes 2` / `--rate hbr` (the real values are in the panel DPCD; this
-tool does not read them). The template VBT is data from the coreboot project (GPL-2.0).
+The template VBT is data from the coreboot project (GPL-2.0).
 
-## Backlight in the VBT
-
-`tools/make_vbt.py` writes the VBT backlight block (BDB 43) as **type NONE** by default
-(`--backlight pwm` keeps the template's PWM data). The panel on the T2 MacBook is dimmed by gmux
-(port 0x74, driven through ACPI `_BCM`, see the ACPI patch above), not by an Intel PWM, so the
-Intel driver must not claim a PWM it cannot use.
-## Live eDP probe instead of a hand-made VBT (mode 4)
+## Live eDP probe instead of a hand-made VBT (modes 4, 5)
 
 The ACPI tables of the T2 Macs contain no eDP link training for either GPU. The "link training" names
 in the Radeon SSDT (`LTRN`, `LTRC`, `LCRL`, `LSTS`, method `PUPD`) retrain the **PCIe** link of the PEG
@@ -118,7 +108,7 @@ slot. DisplayPort link training is done by the graphics driver: the Radeon drive
 driver for DDI A. The Intel driver only starts it if the VBT says an eDP panel is on DDI A, and it takes
 the link limits (rate, lanes, PSR) from the VBT. Apple leaves the VBT empty, so the loader supplies one.
 
-Instead of guessing `--lanes/--rate`, `lib/int_edp.c` asks the panel through the iGPU, as i915 would:
+Instead of guessing lanes and rate, `lib/int_edp.c` asks the panel through the iGPU, as i915 would:
 
 1. Request the power wells AUX-A needs (`PWR_WELL_CTL2`: PW1 and DDI A/E IO) if they are down.
 2. If the panel is off (`PP_STATUS` bit 31 clear), force VDD (`PP_CONTROL` bit 3), wait 150 ms, release it after.
@@ -131,8 +121,6 @@ Instead of guessing `--lanes/--rate`, `lib/int_edp.c` asks the panel through the
 
 If the probe fails, the built-in defaults (4 x HBR2) are kept; if there is no EDID at all the mailbox is left
 empty rather than given a placeholder timing. `DDI_A_4_LANES` is only forced when the panel reports 4 lanes.
-The inject log (`*_inject.txt` with key D) lists every step, including the raw register values.
-
 Host tests (no hardware, `gcc` only): `tests/host/run.sh`. They check the VBT patcher byte-for-byte against
 `make_vbt.py`, and the AUX code against a simulated panel (retry, dead panel, panel already on, regs reading
 all ones). They do not prove the sequence works on real silicon.

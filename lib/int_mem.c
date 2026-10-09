@@ -12,26 +12,6 @@ VOID* _INT_AllocatePool(EFI_BOOT_SERVICES* BS, UINTN Size)
     return p;
 }
 
-VOID* _INT_ReallocatePool(EFI_BOOT_SERVICES* BS, VOID* OldPool, UINTN OldSize, UINTN NewSize)
-{
-    VOID                    *NewPool;
-
-    NewPool = NULL;
-    if (NewSize) {
-        NewPool = _INT_AllocatePool(BS, NewSize);
-    }
-
-    if (OldPool) {
-        if (NewPool) {
-            _INT_memcpy(NewPool, OldPool, OldSize < NewSize ? OldSize : NewSize);
-        }
-    
-        _INT_FreePool(BS, OldPool);
-    }
-    
-    return NewPool;
-}
-
 VOID _INT_FreePool(EFI_BOOT_SERVICES* BS, VOID *Buffer)
 {
     BS->FreePool(Buffer);

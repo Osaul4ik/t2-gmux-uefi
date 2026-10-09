@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-make_vbt.py - build t2gmux_vbt.bin for the t2-gmux-uefi loader (key I).
+make_vbt.py - build the VBT that tools/gen_vbt_base.py turns into lib/vbt_base.c
+(the VBT built into the loader). Developer tool, not needed to use the loader.
 
 Apple's T2 firmware leaves the Intel OpRegion VBT mailbox empty, so the Windows
 Intel driver does not know that an eDP panel is wired to DDI A and never starts
@@ -16,8 +17,6 @@ board, same gen9.5 display engine) and patches it for the Mac:
 Usage:
   python make_vbt.py --edid edid.bin            [--lanes 4] [--rate hbr2] [-o t2gmux_vbt.bin]
   python make_vbt.py --edid-hex 00ffffffffffff00...        (hex string or a text file with hex)
-
-Copy the result to the ESP root as  \\t2gmux_vbt.bin  and boot the loader with key I.
 
 Layouts follow the Linux kernel's drivers/gpu/drm/i915/display/intel_vbt_defs.h.
 """

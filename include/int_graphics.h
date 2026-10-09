@@ -16,7 +16,6 @@ typedef struct {
 VOID _INT_SetGraphicsMode(EFI_BOOT_SERVICES* BS, BOOLEAN Enable);
 
 VOID _INT_SimpleTextGraphicsInit(_INT_SimpleTextGraphicsStruct* gs);
-VOID _INT_SimpleTextGraphicsDeinit(_INT_SimpleTextGraphicsStruct* gs);
 VOID _INT_SimpleTextGraphicsPrint(
     _INT_SimpleTextGraphicsStruct* gs,
     UINTN col,

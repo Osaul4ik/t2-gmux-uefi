@@ -2,7 +2,7 @@
 """
 gen_vbt_base.py - regenerate lib/vbt_base.c (the VBT built into the loader).
 
-The loader no longer needs a hand-made t2gmux_vbt.bin: it carries this generic
+The loader carries this generic
 base VBT (coreboot Whiskey Lake template, only the eDP child on DDI A / AUX-A,
 no Intel backlight PWM, fast link training off) and fills in the panel-specific
 parts at boot:

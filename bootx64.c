@@ -290,139 +290,6 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
     return ok;
 }
 
-// ---- OpRegion / VBT diagnostic dump (key L) ----
-// Writes <tag>.txt (readable report), <tag>.bin (raw OpRegion) and
-// <tag>_vbt.bin (raw VBT) to the ESP root and shows a short summary.
-static VOID
-DoVbtDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruct *gs,
-          CHAR16 *TxtName, CHAR16 *OpName, CHAR16 *VbtName, CHAR16 *Label, UINTN Row)
-{
-    const UINTN Cap = 49152;
-    CHAR8 *Buf = (CHAR8 *)_INT_AllocatePool(BS, Cap);
-    _INT_Rep R;
-    _INT_VbtInfo Info;
-    EFI_STATUS St;
-
-    if (Buf == NULL)
-        return;
-    _INT_RepInit(&R, Buf, Cap);
-
-    _INT_RepStr(&R, (const CHAR8 *)"=== t2-gmux-uefi OpRegion/VBT dump: ");
-    for (UINTN i = 0; Label[i]; i++) {
-        CHAR8 t[2] = { (CHAR8)Label[i], 0 };
-        _INT_RepStr(&R, t);
-    }
-    _INT_RepStr(&R, (const CHAR8 *)" ==="); _INT_RepNl(&R);
-
-    // gmux register readback (port: value) so the mux state is part of the report
-    {
-        volatile UINT8 *Base = (volatile UINT8 *)(UINTN)GMUX_PHYS_BASE;
-        static const UINT8 Ports[6] = { GMUX_PORT_SWITCH_DISPLAY, GMUX_PORT_SWITCH_DDC,
-                                        GMUX_PORT_SWITCH_EXTERNAL, GMUX_PORT_DISCRETE_POWER,
-                                        GMUX_PORT_INTERRUPT_ENABLE, GMUX_PORT_INTERRUPT_STATUS };
-        _INT_RepStr(&R, (const CHAR8 *)"gmux readback:");
-        if (!GmuxDetect(Base)) {
-            _INT_RepStr(&R, (const CHAR8 *)" no gmux");
-        } else {
-            for (UINTN i = 0; i < 6; i++) {
-                UINT8 v = 0;
-                _INT_RepStr(&R, (const CHAR8 *)" 0x"); _INT_RepHex(&R, Ports[i], 2);
-                _INT_RepStr(&R, (const CHAR8 *)"=");
-                if (GmuxRead8(Base, BS, Ports[i], &v)) {
-                    _INT_RepHex(&R, v, 2);
-                } else {
-                    _INT_RepStr(&R, (const CHAR8 *)"??");
-                }
-            }
-        }
-        _INT_RepNl(&R);
-    }
-
-    St = _INT_InspectIgpuOpRegion(BS, Image, &R, &Info);
-
-    EFI_STATUS S1 = _INT_WriteEspFile(BS, Image, TxtName, Buf, R.len);
-    EFI_STATUS S2 = EFI_NOT_FOUND, S3 = EFI_NOT_FOUND;
-    if (Info.OpRegion)
-        S2 = _INT_WriteEspFile(BS, Image, OpName, Info.OpRegion, Info.OpSize);
-    if (Info.Vbt)
-        S3 = _INT_WriteEspFile(BS, Image, VbtName, Info.Vbt, Info.VbtSize);
-
-    _INT_SimpleTextGraphicsPrint(gs, 2, Row, TRUE, FALSE,
-        L"[%s] iGPU=%s ASLS=%x OpRegion=%s VBT=%s (ver %d, bdb %d)",
-        Label, Info.IgpuFound ? L"yes" : L"NO", Info.Asls,
-        Info.OpRegionOk ? L"ok" : L"NO", Info.VbtFound ? L"ok" : L"NO",
-        (UINTN)Info.VbtVer, (UINTN)Info.BdbVer);
-    if (Info.EdpFound) {
-        _INT_SimpleTextGraphicsPrint(gs, 2, Row + 1, TRUE, FALSE,
-            L"  eDP child: type=%04x dvo_port=%d aux=%02x ddc_pin=%d",
-            (UINTN)Info.EdpType, (UINTN)Info.EdpDvoPort, (UINTN)Info.EdpAux, (UINTN)Info.EdpDdc);
-    } else {
-        _INT_SimpleTextGraphicsPrint(gs, 2, Row + 1, TRUE, FALSE,
-            L"  eDP child: NOT FOUND in VBT");
-    }
-    if (Info.HaveLink) {
-        _INT_SimpleTextGraphicsPrint(gs, 2, Row + 2, TRUE, FALSE,
-            L"  panel_type=%d link rate code=%d lanes code=%d",
-            (UINTN)Info.PanelType, (UINTN)Info.LinkRate, (UINTN)Info.LinkLanes);
-    } else {
-        _INT_SimpleTextGraphicsPrint(gs, 2, Row + 2, TRUE, FALSE,
-            L"  panel_type=%d, no eDP link params", (UINTN)Info.PanelType);
-    }
-    _INT_SimpleTextGraphicsPrint(gs, 2, Row + 3, TRUE, TRUE,
-        L"  files: txt=%s bin=%s vbt=%s (inspect=%lX)",
-        EFI_ERROR(S1) ? L"FAIL" : L"ok",
-        EFI_ERROR(S2) ? L"-" : L"ok",
-        EFI_ERROR(S3) ? L"-" : L"ok", St);
-
-    _INT_FreePool(BS, Buf);
-}
-
-// Output file names: \t2gmux_L_<boot>_<what>, e.g. \t2gmux_L_rad_after.txt.
-//   boot = "igpu" if the Intel iGPU was already visible before AppleSetOs
-//          (firmware booted from the iGPU), "rad" on a Radeon boot
-// so runs with different boot GPUs never overwrite each other.
-static VOID
-MakeName(CHAR16 *Out, const CHAR16 *Boot, const CHAR16 *What)
-{
-    static const CHAR16 Pre[] = L"\\t2gmux_L_";
-    UINTN n = 0;
-
-    for (UINTN i = 0; Pre[i]; i++) Out[n++] = Pre[i];
-    for (UINTN i = 0; Boot[i]; i++) Out[n++] = Boot[i];
-    Out[n++] = L'_';
-    for (UINTN i = 0; What[i]; i++) Out[n++] = What[i];
-    Out[n] = 0;
-}
-
-// Register snapshot (\\t2gmux_<key>_<boot>_regs_<tag>.txt): iGPU display state at this moment.
-// Compare "before" and "after" to see what the loader changes in the iGPU state.
-static VOID
-DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruct *gs,
-           CHAR16 *FileName, CHAR16 *Label, UINTN Row)
-{
-    const UINTN Cap = 8192;
-    CHAR8 *Buf = (CHAR8 *)_INT_AllocatePool(BS, Cap);
-    _INT_Rep R;
-    EFI_STATUS Rs, Ws;
-
-    if (Buf == NULL)
-        return;
-    _INT_RepInit(&R, Buf, Cap);
-    _INT_RepStr(&R, (const CHAR8 *)"=== t2-gmux-uefi iGPU registers: ");
-    for (UINTN i = 0; Label[i]; i++) {
-        CHAR8 t[2] = { (CHAR8)Label[i], 0 };
-        _INT_RepStr(&R, t);
-    }
-    _INT_RepStr(&R, (const CHAR8 *)" ==="); _INT_RepNl(&R);
-
-    Rs = _INT_DumpIgpuRegs(BS, Image, &R);
-    Ws = _INT_WriteEspFile(BS, Image, FileName, Buf, R.len);
-
-    _INT_SimpleTextGraphicsPrint(gs, 2, Row, TRUE, TRUE,
-        L"[%s] regs: read=%lX file=%s", Label, Rs, EFI_ERROR(Ws) ? L"FAIL" : L"ok");
-    _INT_FreePool(BS, Buf);
-}
-
 // ---- UI: plain ASCII frame on the text console ----
 //
 //  +======================================================================+
@@ -481,27 +348,21 @@ DoRegsDump(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, _INT_SimpleTextGraphicsStruc
 #define PR_VBT          8
 #define PR_DDI          9
 #define PR_ACPI         10
-#define PR_BEFORE       11      // 4 rows: 11..14
-#define PR_REGS_BEFORE  15
-#define PR_AFTER        16      // 4 rows: 16..19
-#define PR_REGS_AFTER   20
-#define PR_FILES        21
-#define PR_BOOT         22
+#define PR_BOOT         11
 
 #define COUNTDOWN_SECS  5
 #define TICKS_PER_SEC   20      // one tick = one 50 ms wait
 
 typedef enum {
-    MODE_RADEON = 0,            // 1: Standard Boot (clean boot, nothing is touched)
-    MODE_RADEON_INTEL,          // 2: Boot + Apple_set_os (standard boot + apple_set_os patch)
-    MODE_MUX_LANES_PATCH,       // 3: Integrated gfx (AppleSetOs + mux + Radeon OFF + DDI A 4 lanes + ACPI patch, no VBT)
-    MODE_INTEL,                 // 4: Integrated gfx + separate VBT (3 + VBT injection from file + EDID from dGPU)
-    MODE_INTEL_DGPU_ON,         // 5: copy of 4, but the Radeon rail stays ON; ACPI patch = brightness only (no sleep fix)
+    MODE_RADEON = 0,            // 1: Standart Boot (clean boot, nothing is touched)
+    MODE_RADEON_INTEL,          // 2: Standart Boot + Intel Secondary (standard boot + apple_set_os), Advanced menu
+    MODE_INTEL,                 // 4: Efficient Boot (AppleSetOs + mux + Radeon OFF + DDI A 4 lanes + ACPI patch + built-in VBT)
+    MODE_INTEL_DGPU_ON,         // 5: Hybrid Boot: as 4, but the Radeon rail stays ON; ACPI patch = brightness only (no sleep fix)
     MODE_COUNT
 } BOOT_MODE;
 
-// Main menu: modes 1, 4, 5 and the Advanced menu entry (6). Modes 2 and 3 are not in the main
-// menu (mode 2 is reached from the Advanced menu). One separator row ("*************************")
+// Main menu: modes 1, 4, 5 and the Advanced menu entry (6). Mode 2 is not in the main
+// menu (it is reached from the Advanced menu). One separator row ("*************************")
 // sits between mode 5 and the Advanced menu. It is not an entry, so Up/Down (which walk over
 // entries only) can never land on it.
 static const UINTN MenuOrder[MENU_ITEMS] = { MODE_RADEON, MODE_INTEL, MODE_INTEL_DGPU_ON, MENU_ADV };
@@ -524,7 +385,7 @@ MenuRowOf(UINTN M)
     return MENU_ROW + Pos + ((Pos >= 3) ? 1 : 0);
 }
 
-// indexed by mode; modes 2 and 3 have no main-menu text
+// indexed by mode; mode 2 has no main-menu text
 static CHAR16 *MenuText[MODE_COUNT + 1] = {
     [MODE_RADEON]          = L"[1] Standart Boot (Radeon only)",
     [MODE_INTEL]           = L"[4] Efficient Boot (Intel only)",
@@ -535,33 +396,28 @@ static CHAR16 *MenuText[MODE_COUNT + 1] = {
 static CHAR16 *MenuName[MODE_COUNT] = {
     L"1 - Standart Boot (Radeon only)",
     L"2 - Standart Boot + Intel Secondary",
-    L"3 - Integrated gfx",
     L"4 - Efficient Boot (Intel only)",
     L"5 - Hybrid Boot (Intel + Radeon)",
 };
 
 // Default mode (the one with the x mark, started by the auto-boot timer) is kept in a
 // one-character file in the root of the ESP (1, 4 or 5); key X in the menu rewrites it.
-// The old letters of earlier versions (D, A, H, I) are still read from that file.
 #define DEFAULT_FILE    L"\\t2gmux_default.txt"
-static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'3', L'4', L'5' };
-static const CHAR16 ModeLegacy[MODE_COUNT] = { L'D', L'A', L'H', L'I', L'5' };   // old default-file letters (5 never had one)
+static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'4', L'5' };
 
 static BOOT_MODE
 DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image)
 {
     VOID *Data = NULL;
     UINTN Size = 0;
-    BOOT_MODE Def = MODE_INTEL;                    // no file / unreadable: 4 (former I), as before
+    BOOT_MODE Def = MODE_INTEL;                    // no file / unreadable: 4
 
     if (!EFI_ERROR(_INT_ReadEspFile(BS, Image, DEFAULT_FILE, &Data, &Size)) && Data != NULL) {
         for (UINTN i = 0; i < Size; i++) {
             CHAR8 ch = ((CHAR8 *)Data)[i];
-            if (ch >= 'a' && ch <= 'z')
-                ch = (CHAR8)(ch - 'a' + 'A');
             UINTN m;
             for (m = 0; m < MODE_COUNT; m++) {
-                if ((CHAR8)ModeLetter[m] == ch || (CHAR8)ModeLegacy[m] == ch) {
+                if ((CHAR8)ModeLetter[m] == ch) {
                     Def = (BOOT_MODE)m;
                     break;
                 }
@@ -571,11 +427,8 @@ DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image)
         }
         _INT_FreePool(BS, Data);
     }
-    // modes 2 / 3 are not in the main menu any more: an old default file falls back to a visible entry
-    if (Def == MODE_RADEON_INTEL)
+    if (Def == MODE_RADEON_INTEL)                  // mode 2 is not in the main menu
         Def = MODE_RADEON;
-    else if (Def == MODE_MUX_LANES_PATCH)
-        Def = MODE_INTEL;
     return Def;
 }
 
@@ -590,11 +443,9 @@ DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode)
 }
 
 // ---- required files per mode ----
-// 3 = full ACPI patch with the VBT inside the SSDT: needs \SSDT_IGPU_VBT.aml.
 // 4 = ACPI patch without VBT + built-in VBT completed from the panel and injected from UEFI: needs \SSDT_IGPU.aml.
 // 5 = same as 4 (Radeon stays ON), but with its own brightness-only SSDT: needs \SSDT_IGPU_BRT.aml.
 // A mode whose files are missing cannot be chosen: the menu stays and shows a message.
-#define ACPI_FILE_FULL  L"\\SSDT_IGPU_VBT.aml"      // mode 3
 #define ACPI_FILE_BASE  L"\\SSDT_IGPU.aml"          // mode 4
 #define ACPI_FILE_BRT   L"\\SSDT_IGPU_BRT.aml"      // mode 5 (brightness only, no sleep fix)
 
@@ -616,12 +467,7 @@ EspFileExists(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, const CHAR16 *Name)
 static BOOLEAN
 ModeAvailable(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, const CHAR16 **Msg)
 {
-    if (Mode == MODE_MUX_LANES_PATCH) {
-        if (!EspFileExists(BS, Image, ACPI_FILE_FULL)) {
-            *Msg = L"mode 3 unavailable: SSDT_IGPU_VBT.aml not found";
-            return FALSE;
-        }
-    } else if (Mode == MODE_INTEL) {
+    if (Mode == MODE_INTEL) {
         // No VBT file: the built-in VBT is completed from the panel itself
         // (DPCD / EDID over the iGPU's AUX channel).
         if (!EspFileExists(BS, Image, ACPI_FILE_BASE)) {
@@ -1021,21 +867,17 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
 
     // Boot modes (chosen in the menu):
-    //   1 = Standard Boot: clean boot - no AppleSetOs, no mux, no rail, no injects, no files
-    //   2 = Boot + Apple_set_os: standard boot + AppleSetOs patch - no gmux, no rail, no VBT/DDI/ACPI patches, no files
-    //   3 = Integrated gfx: AppleSetOs + mux->iGPU + Radeon rail OFF + DDI A 4 lanes + ACPI patch
-    //       (SSDT_IGPU_VBT.aml, the VBT is inside the SSDT); no VBT injection from UEFI, no files
-    //   4 = Integrated gfx + built-in VBT: as 3 but with SSDT_IGPU.aml (no VBT inside) + inject
-    //       the built-in VBT from UEFI (link from panel DPCD, timing from EDID)
-    //   5 = copy of 4, but the Radeon rail stays ON, and the ACPI patch is SSDT_IGPU_BRT.aml:
+    //   1 = Standart Boot: clean boot - no AppleSetOs, no mux, no rail, no injects, no files
+    //   2 = Standart Boot + Intel Secondary (Advanced menu): standard boot + AppleSetOs patch - no gmux,
+    //       no rail, no VBT/DDI/ACPI patches, no files
+    //   4 = Efficient Boot: AppleSetOs + mux->iGPU + Radeon rail OFF + DDI A 4 lanes + ACPI patch
+    //       (SSDT_IGPU.aml) + the built-in VBT injected from UEFI (link from panel DPCD, timing from EDID)
+    //   5 = Hybrid Boot: copy of 4, but the Radeon rail stays ON, and the ACPI patch is SSDT_IGPU_BRT.aml:
     //       brightness (_BCM) only - no _PTS / _WAK, so sleep is left exactly as the firmware has it
-    BOOLEAN DoSetOs = FALSE;   // 2 / 3 / 4 / 5: load AppleSetOs (the iGPU becomes visible)
-    BOOLEAN DoSwitch = FALSE;  // 3 / 4 / 5: mux->iGPU + DDI A 4 lanes (+ VBT / ACPI patch, see below)
-    BOOLEAN DoRailOff = FALSE; // 3 / 4: additionally Radeon rail OFF (5 leaves it ON)
-    BOOLEAN DoVbt = FALSE;     // 4 / 5: VBT injection + EDID from the dGPU (3 skips it)
-    BOOLEAN DoAcpi = FALSE;    // 3 / 4 / 5: ACPI patch inside the switch block
+    BOOLEAN DoSetOs = FALSE;   // 2 / 4 / 5: load AppleSetOs (the iGPU becomes visible)
+    BOOLEAN DoSwitch = FALSE;  // 4 / 5: mux->iGPU + DDI A 4 lanes + VBT injection + ACPI patch
+    BOOLEAN DoRailOff = FALSE; // 4: additionally Radeon rail OFF (5 leaves it ON)
     CHAR16 *AcpiFile = NULL;   // SSDT file of the chosen mode (set below)
-    BOOLEAN DoDump = FALSE;    // dump / log files (no menu mode sets it any more)
 
 
     // find and load bootx64_original.efi
@@ -1093,7 +935,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     // ---- boot mode menu ----
     // Up/Down = move (over entries only, the separators are skipped), Enter/Space = confirm,
-    // 1 / 4 / 5 = pick and confirm at once (old letters D / I still work for 1 / 4), 6 = Advanced menu,
+    // 1 / 4 / 5 = pick and confirm at once, 6 = Advanced menu,
     // X = save the highlighted mode as the default (marked x). Any key stops the auto-boot
     // timer; if no key is pressed for COUNTDOWN_SECS the default mode is started.
     BOOT_MODE Def = DefaultLoad(BS, ImageHandle);
@@ -1160,9 +1002,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                     }
                 }
                 TimerOn = FALSE;
-            } else if (c == L'1' || c == L'd' || c == L'D') {
+            } else if (c == L'1') {
                 Sel = MODE_RADEON; Want = TRUE;
-            } else if (c == L'4' || c == L'i' || c == L'I') {
+            } else if (c == L'4') {
                 Sel = MODE_INTEL; Want = TRUE;
             } else if (c == L'5') {
                 Sel = MODE_INTEL_DGPU_ON; Want = TRUE;
@@ -1207,26 +1049,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     case MODE_RADEON_INTEL:
         DoSetOs = TRUE;
         break;
-    case MODE_MUX_LANES_PATCH:
-        DoSetOs = TRUE;
-        DoSwitch = TRUE;
-        DoRailOff = TRUE;
-        DoAcpi = TRUE;                                 // no DoVbt
-        AcpiFile = ACPI_FILE_FULL;
-        break;
     case MODE_INTEL:
         DoSetOs = TRUE;
         DoSwitch = TRUE;
         DoRailOff = TRUE;
-        DoVbt = TRUE;
-        DoAcpi = TRUE;
         AcpiFile = ACPI_FILE_BASE;
         break;
     case MODE_INTEL_DGPU_ON:
         DoSetOs = TRUE;                                // as 4 ...
         DoSwitch = TRUE;
-        DoVbt = TRUE;
-        DoAcpi = TRUE;
         AcpiFile = ACPI_FILE_BRT;                      // ... brightness-only SSDT
         // DoRailOff stays FALSE: the Radeon is not switched off
         break;
@@ -1238,28 +1069,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     ClearRowsFrom(&gs, ROW_STATUS);
     LOG(&gs, PR_MODE, L"Mode: %s", MenuName[Sel]);
 
-    // File name tag: which GPU the firmware booted from (see MakeName).
-    const CHAR16 *BootTag = L"rad";
-    CHAR16 N1[64], N2[64], N3[64], N4[64];
-    if (DoDump) {
-        if (_INT_IgpuVisible(BS, ImageHandle))
-            BootTag = L"igpu";
-        MakeName(N1, BootTag, L"*");
-        LOG(&gs, PR_FILES, L"files: %s", N1);
-    }
-
-    // Must come after the mode is known (L), otherwise L
-    // never writes the "before" report.
-    if (DoDump) {
-        MakeName(N1, BootTag, L"before.txt");
-        MakeName(N2, BootTag, L"before_opregion.bin");
-        MakeName(N3, BootTag, L"before_vbt.bin");
-        DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"before", PR_BEFORE);
-        MakeName(N4, BootTag, L"regs_before.txt");
-        DoRegsDump(BS, ImageHandle, &gs, N4, L"before", PR_REGS_BEFORE);
-    }
-
-    // load apple_set_os - only for modes 2 / 3 / 4; mode 1 = plain Windows boot
+    // load apple_set_os - only for modes 2 / 4 / 5; mode 1 = plain Windows boot
     if (!DoSetOs) {
         LOG(&gs, PR_SETOS, L"AppleSetOs: not loaded");
     } else if (AppleSetOsHandleCount == 0) {
@@ -1310,7 +1120,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     if (AppleSetOsHandleBuf != NULL)
         _INT_FreePool(BS, AppleSetOsHandleBuf);
 
-    // ---- modes 3 / 4 / 5: gmux panel switch, (3 / 4: dGPU rail OFF), (4 / 5: VBT inject) ----
+    // ---- modes 4 / 5: gmux panel switch, (4: dGPU rail OFF), VBT inject, ACPI patch ----
     // Never power the dGPU rail back on from Windows after OFF (known hang on this HW).
     if (DoSwitch) {
         GMUX_IRQ_SAVE IrqSave;
@@ -1349,7 +1159,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             BS->Stall(10000);
         }
 
-        // VBT inject + DDI A 4 lanes + optional ACPI patch
+        // VBT inject + DDI A 4 lanes + ACPI patch
         const UINTN RCap = 8192;
         CHAR8 *RBuf = (CHAR8 *)_INT_AllocatePool(BS, RCap);
         EFI_STATUS IS = EFI_OUT_OF_RESOURCES;
@@ -1365,29 +1175,27 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         if (RBuf != NULL) {
             _INT_Rep IR;
             _INT_RepInit(&IR, RBuf, RCap);
-            if (DoVbt) {
-                // The iGPU trains the link itself, so ask the panel what it can do: DPCD
-                // (rate / lanes / PSR) and EDID over the iGPU's own AUX-A channel.
-                _INT_EdpProbe(BS, ImageHandle, &Caps, &IR);
+            // The iGPU trains the link itself, so ask the panel what it can do: DPCD
+            // (rate / lanes / PSR) and EDID over the iGPU's own AUX-A channel.
+            _INT_EdpProbe(BS, ImageHandle, &Caps, &IR);
 
-                IS = _INT_InjectVbtBuiltin(BS, ImageHandle, &IR);
-                if (!EFI_ERROR(IS))
-                    DS = _INT_VbtApplyDpcd(BS, ImageHandle, &Caps, &IR);
-                // Apple's EFI only has panel data for the dGPU: put its EDID timing into the iGPU VBT;
-                // if it has none, take the EDID the panel itself returned over AUX.
-                if (!EFI_ERROR(IS)) {
-                    ES = _INT_VbtApplyFirmwareEdid(BS, ImageHandle, &IR);
-                    if (EFI_ERROR(ES) && Caps.HasEdid) {
-                        ES = _INT_VbtApplyEdidBuf(BS, ImageHandle, Caps.Edid, 128,
-                                                  "panel EDID over AUX", &IR);
-                        EdidFromAux = !EFI_ERROR(ES);
-                    }
-                    // The built-in VBT only has a placeholder timing: without a real EDID the
-                    // driver would get a wrong panel, so leave the mailbox empty as before.
-                    if (EFI_ERROR(ES)) {
-                        _INT_VbtClearMailbox(BS, ImageHandle, &IR);
-                        IS = EFI_NOT_READY;
-                    }
+            IS = _INT_InjectVbtBuiltin(BS, ImageHandle, &IR);
+            if (!EFI_ERROR(IS))
+                DS = _INT_VbtApplyDpcd(BS, ImageHandle, &Caps, &IR);
+            // Apple's EFI only has panel data for the dGPU: put its EDID timing into the iGPU VBT;
+            // if it has none, take the EDID the panel itself returned over AUX.
+            if (!EFI_ERROR(IS)) {
+                ES = _INT_VbtApplyFirmwareEdid(BS, ImageHandle, &IR);
+                if (EFI_ERROR(ES) && Caps.HasEdid) {
+                    ES = _INT_VbtApplyEdidBuf(BS, ImageHandle, Caps.Edid, 128,
+                                              "panel EDID over AUX", &IR);
+                    EdidFromAux = !EFI_ERROR(ES);
+                }
+                // The built-in VBT only has a placeholder timing: without a real EDID the
+                // driver would get a wrong panel, so leave the mailbox empty as before.
+                if (EFI_ERROR(ES)) {
+                    _INT_VbtClearMailbox(BS, ImageHandle, &IR);
+                    IS = EFI_NOT_READY;
                 }
             }
             // Same iGPU-side setup the firmware does when it boots from the iGPU
@@ -1397,48 +1205,22 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 Skip4Lanes = TRUE;
             else
                 LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
-            // ACPI patch (brightness via gmux) from the ESP root: mode 3 = SSDT_IGPU_VBT.aml
-            // (VBT inside the SSDT), mode 4 = SSDT_IGPU.aml (VBT injected separately above),
-            // mode 5 = SSDT_IGPU_BRT.aml (brightness only, VBT injected separately above).
-            if (DoAcpi)
-                AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, AcpiFile, &IR);
-            if (DoDump) {
-                MakeName(N1, BootTag, L"inject.txt");
-                _INT_WriteEspFile(BS, ImageHandle, N1, RBuf, IR.len);
-            }
+            // ACPI patch (brightness via gmux) from the ESP root: mode 4 = SSDT_IGPU.aml,
+            // mode 5 = SSDT_IGPU_BRT.aml (brightness only).
+            AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, AcpiFile, &IR);
             _INT_FreePool(BS, RBuf);
         }
-        if (DoVbt) {
-            LOG(&gs, PR_VBT, L"VBT %s (%lX): link %s, EDID %s",
-                EFI_ERROR(IS) ? L"FAILED" : L"OK", IS,
-                EFI_ERROR(DS) ? L"default 4xHBR2 (probe failed)" : L"from panel DPCD",
-                EFI_ERROR(ES) ? L"not applied" : (EdidFromAux ? L"from panel" : L"from dGPU"));
-        } else {
-            LOG(&gs, PR_VBT, L"VBT inject: skipped (mode %s)", L"3");
-        }
+        LOG(&gs, PR_VBT, L"VBT %s (%lX): link %s, EDID %s",
+            EFI_ERROR(IS) ? L"FAILED" : L"OK", IS,
+            EFI_ERROR(DS) ? L"default 4xHBR2 (probe failed)" : L"from panel DPCD",
+            EFI_ERROR(ES) ? L"not applied" : (EdidFromAux ? L"from panel" : L"from dGPU"));
         if (Skip4Lanes)
             LOG(&gs, PR_DDI, L"DDI A 4 lanes: skipped (panel reports %lX lane(s))", (UINTN)Caps.MaxLanes);
         else
             LOG(&gs, PR_DDI, L"DDI A 4 lanes: %s (%lX)", EFI_ERROR(LS) ? L"FAILED" : L"OK", LS);
-        if (DoAcpi) {
-            LOG(&gs, PR_ACPI, L"ACPI patch %s: %s (%lX)",
-                AcpiFile + 1,                          // file name without the leading backslash
-                AS == EFI_NOT_FOUND ? L"not found, skipped" : (EFI_ERROR(AS) ? L"FAILED" : L"OK"), AS);
-        } else {
-            LOG(&gs, PR_ACPI, L"ACPI patch: skipped");
-        }
-    }
-
-    if (DoDump) {
-        MakeName(N1, BootTag, L"after.txt");
-        MakeName(N2, BootTag, L"after_opregion.bin");
-        MakeName(N3, BootTag, L"after_vbt.bin");
-        DoVbtDump(BS, ImageHandle, &gs, N1, N2, N3, L"after", PR_AFTER);
-        MakeName(N4, BootTag, L"regs_after.txt");
-        DoRegsDump(BS, ImageHandle, &gs, N4, L"after", PR_REGS_AFTER);
-        for (UINT16 j = 0; j < 800; j++) {
-            BS->Stall(10000);   // ~8 s to read the summary
-        }
+        LOG(&gs, PR_ACPI, L"ACPI patch %s: %s (%lX)",
+            AcpiFile + 1,                              // file name without the leading backslash
+            AS == EFI_NOT_FOUND ? L"not found, skipped" : (EFI_ERROR(AS) ? L"FAILED" : L"OK"), AS);
     }
 
     LOG(&gs, PR_BOOT, L"Booting bootx64_original.efi...");
