@@ -27,15 +27,15 @@ machine's own ACPI dump (section 8).
 
 ## 1. Boot modes and the files they need
 
-The loader menu has five modes (mode 5 has its own guide, see the note below the table):
+The loader has five modes: 1, 4 and 5 in the main menu, 2 in the Advanced menu, 3 not in the menu (mode 5 has its own guide, see the note below the table):
 
 | Key | Mode | ACPI patch file (ESP root) | VBT |
 |-----|------|----------------------------|-----|
-| **1** | Standard Boot | none | none |
-| **2** | Boot + Apple_set_os | none | none |
+| **1** | Standart Boot (Radeon only) | none | none |
+| **2** | Standart Boot + Intel Secondary (Advanced menu) | none | none |
 | **3** | Integrated gfx | `\SSDT_IGPU_VBT.aml` | inside the SSDT (built with `--vbt`) |
-| **4** | Integrated gfx + built-in VBT | `\SSDT_IGPU.aml` | built into the loader, completed from the panel (DPCD / EDID), injected from UEFI; no file |
-| **5** | Integrated gfx + built-in VBT, Radeon ON | `\SSDT_IGPU_BRT.aml` | as mode 4 |
+| **4** | Efficient Boot (Intel only), built-in VBT | `\SSDT_IGPU.aml` | built into the loader, completed from the panel (DPCD / EDID), injected from UEFI; no file |
+| **5** | Hybrid Boot (Intel + Radeon), built-in VBT | `\SSDT_IGPU_BRT.aml` | as mode 4 |
 
 Mode **5** is mode 4 with the Radeon left ON and a brightness-only SSDT (no sleep fix). Its patch file is
 built from `tools/SSDT_IGPU_BRT.asl` and has its own procedure: [ACPI_PATCH_GUIDE_MODE5.md](ACPI_PATCH_GUIDE_MODE5.md).

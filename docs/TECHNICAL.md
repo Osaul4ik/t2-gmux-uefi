@@ -28,30 +28,18 @@ only the new `_BCM`. It does not contain the names `XWAK` / `XPTS`, so the loade
 DSDT: the only change to the firmware tables is `_BCM` -> `XBCM` in `SaSsdt`, plus the appended SSDT.
 Sleep / resume stays as the firmware has it.
 
-## Advanced Menu: gpu-power-prefs (NVRAM)
+## Advanced menu
 
-Menu entry 6 is not a boot mode. It opens `AdvancedMenu()` in `bootx64.c`, which uses the runtime
-services (`GetVariable` / `SetVariable`) on the Apple variable `gpu-power-prefs`, vendor GUID
-`fa4ce28d-b62f-4c99-9cc3-6815686e30f9`, attributes `0x07` (non-volatile + boot services + runtime, as macOS
-writes it).
+Menu entry 6 is not a boot mode. It opens `AdvancedMenu()` in `bootx64.c` with three entries:
 
-- Switch to iGPU: `SetVariable` with the 4 bytes `01 00 00 00`.
-- Switch to dGPU: `SetVariable` with size 0, which deletes the variable (an already absent variable is not
-  an error).
-- Both are verified by reading the variable back; the status line shows the result. After a verified
-  success `RebootNow()` waits 1.5 s and calls `ResetSystem(EfiResetCold, ...)` so the firmware reads the new
-  value. A failed write does not reboot. The `Reboot` entry calls the same function without changing anything.
-- Visibility: variable found (`EFI_SUCCESS` or `EFI_BUFFER_TOO_SMALL`) -> only Switch to dGPU; `EFI_NOT_FOUND`
-  -> only Switch to iGPU; any other read error -> both.
+- Standart Boot + Intel Secondary: returns TRUE to the caller, which starts mode 2 (standard boot + AppleSetOs).
+- Reboot: `ResetNow()` waits 1.5 s and calls `ResetSystem(EfiResetCold, ...)`.
+- Power off: the same `ResetNow()` with `EfiResetShutdown`.
 
-Mode 5 depends on the same variable: `GpuPrefsIsIGpu()` is true only when the variable is found and its
-first byte is `01`. The loader reads it once at start and again after returning from the Advanced Menu (a successful switch reboots anyway).
-While it is false, mode 5 is drawn as `inactive: Switch to iGPU`, `MenuStep()` skips it for Up/Down, key 5
-shows a status message, and `ModeAvailable()` refuses it (this also covers the auto-boot default; the
-highlight then moves to mode 4). An unreadable variable counts as not confirmed, so mode 5 stays inactive.
-
-The firmware reads the variable early at boot, so a change only applies after a restart; that is why a
-successful switch reboots at once. Nothing else is touched: no gmux access, no ACPI, no files. The Advanced Menu is never saved as the default mode.
+Esc returns FALSE (back to the boot menu). A failed reset shows an error and keeps the menu. Nothing else is
+touched: no gmux access, no ACPI, no NVRAM variables, no files. The Advanced menu is never saved as the default
+mode. The main menu walks over `MenuOrder[]` = modes 1, 4, 5 and the Advanced entry; modes 2 and 3 are not in it
+(an old default file holding 2 or 3 falls back to mode 1 or 4). Mode 5 has no precondition any more.
 
 ## Panel data from the dGPU (EDID substitution, mode 4)
 
