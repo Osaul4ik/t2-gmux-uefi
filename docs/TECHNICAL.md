@@ -85,10 +85,26 @@ saves `gRT->GetVariable` and replaces it with a hook that answers `SecureBoot` (
   The result is checked by comparing `gRT->GetVariable` before and after, then a `SecureBoot` read through the
   hook (printed as `SecureBoot reads N`). Setting True with a missing file, a failed load or a failed start is
   logged and the boot goes on. Mode 1 is the same: the switch is the one exception to "nothing is touched".
-- **Limits.** The driver is a boot-services image: its hook lives in boot-services memory, so it is meant for
-  what runs before `ExitBootServices`. The upstream hook writes the answer without checking `Data` /
-  `*DataSize`, so a caller that probes the size of `SecureBoot` with a NULL buffer would fault inside it.
-  The loader does not change the driver; this is how `FakeSecureBoot.efi` itself behaves.
+- **Runtime build (`FSB/FakeSecureBootPkg/`).** The upstream driver is `UEFI_DRIVER`: its code and data are in
+  boot-services memory, which Windows reclaims after `ExitBootServices`, while the hook stays in
+  `gRT->GetVariable`. The first runtime `GetVariable` call from Windows (seen: `applessd.sys`) then jumped into
+  freed memory = BSOD. The build in `FSB/` is a `DXE_RUNTIME_DRIVER` (PE subsystem 12, loaded into
+  `EfiRuntimeServicesCode`, 4 KiB section alignment, fully position independent: no base relocations):
+  the hook survives `ExitBootServices`; the only pointer that leaves the image (the firmware's own
+  `GetVariable`) is converted with `ConvertPointer` in an `EVT_SIGNAL_VIRTUAL_ADDRESS_CHANGE` notification; the
+  hook touches no boot service, console or other unconverted pointer; it also checks `Data` / `*DataSize`
+  (size probe gives `EFI_BUFFER_TOO_SMALL`), fills `Attributes`, and the `gRT` header CRC32 is recalculated.
+  The debug library is the null one (no console after `ExitBootServices`).
+- **Both driver kinds.** After `StartImage` the loader reads `ImageCodeType` of the driver's loaded-image
+  protocol. `EfiRuntimeServicesCode` = runtime build, the hook stays. Anything else (the upstream build) gets an
+  `EVT_SIGNAL_EXIT_BOOT_SERVICES` event (`FsbExitNotify`) that puts the original `GetVariable` back right before
+  `ExitBootServices` completes (only if the driver's hook is still the top one) and recalculates the CRC32; the
+  loader image is still resident then (it is the parent of `bootx64_original.efi`). If that event cannot be
+  created, the hook is removed at once and the boot goes on without the fake. With such a build the fake is
+  seen by bootmgr / winload only.
+- **Build.** `.github/workflows/build-fsb.yml` builds `bootx64.efi` (gnu-efi, Docker, as `build.yml`) and
+  `FakeSecureBoot.efi` (EDK2 at the pinned revision `EDK2_REF`, toolchain `GCC`, `RELEASE`, X64) and checks that
+  the driver is x86-64 with subsystem 12. Files: `FSB/FakeSecureBootPkg/FakeSecureBoot.c`, `.inf`, `.dsc`.
 
 ## Panel data from the dGPU (EDID substitution, modes 4, 5)
 

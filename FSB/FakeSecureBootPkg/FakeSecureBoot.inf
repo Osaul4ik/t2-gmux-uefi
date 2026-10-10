@@ -1,0 +1,27 @@
+[Defines]
+  INF_VERSION    = 0x00010005
+  BASE_NAME      = FakeSecureBoot
+  FILE_GUID      = 4508124B-B41D-4E49-B6B1-7D3A1F22AFE6
+  MODULE_TYPE    = DXE_RUNTIME_DRIVER
+  VERSION_STRING = 1.1
+  ENTRY_POINT    = UefiMain
+
+[Sources]
+  FakeSecureBoot.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  UefiLib
+  BaseLib
+  BaseMemoryLib
+  UefiDriverEntryPoint
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+
+[Guids]
+  gEfiGlobalVariableGuid
+
+[Depex]
+  TRUE

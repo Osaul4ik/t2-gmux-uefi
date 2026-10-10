@@ -243,14 +243,18 @@ actions:
 ### FakeSecureBoot (optional)
 
 [FakeSecureBoot](https://github.com/Shmurkio/FakeSecureBoot) is a small UEFI driver that makes the firmware
-answer "Secure Boot is on" when the `SecureBoot` variable is read. Build `FakeSecureBoot.efi` from that
-project (EDK2) and put it in the root of the EFI partition; the switch then appears at the top of the
-Advanced menu. The choice is kept in `t2gmux_default.txt` (second line, `FSB=1`; an older file without that
-line means off) and applies to every boot mode, including **1**. On the progress screen it is the line
-`FakeSecureBoot: ...` just above `Booting bootx64_original.efi...`: `off`, `OK (GetVariable hooked, SecureBoot reads 1)`,
-`not found, skipped` (the setting is True but the file is gone) or `FAILED`. A failure never stops the boot,
-Windows simply starts without the fake. It only changes what the firmware reports; it does not turn real
-Secure Boot on.
+answer "Secure Boot is on" when the `SecureBoot` variable is read. This project carries a **runtime build** of
+it in `FSB/FakeSecureBootPkg/` (the upstream build is a boot-services driver and crashes Windows, see
+`docs/TECHNICAL.md`). The workflow `Build bootx64.efi + FakeSecureBoot.efi` builds the loader and the driver;
+take `FakeSecureBoot.efi` from its artifacts and put it in the root of the EFI partition. The switch then
+appears at the top of the Advanced menu. The choice is kept in `t2gmux_default.txt` (second line, `FSB=1`; an
+older file without that line means off) and applies to every boot mode, including **1**. On the progress screen
+it is the line `FakeSecureBoot: ...` just above `Booting bootx64_original.efi...`: `off`,
+`OK (runtime driver, SecureBoot reads 1)`, `OK (SecureBoot reads 1, unhooked at exit)` (an upstream
+boot-services build: the loader removes its hook before Windows starts), `not found, skipped` (the setting is
+True but the file is gone) or `FAILED`. A failure never stops the boot, Windows simply starts without the fake.
+It only changes what the firmware reports; it does not turn real Secure Boot on. With the runtime build the
+fake also holds inside Windows (runtime queries such as `Confirm-SecureBootUEFI`).
 
 The loader reads `gpu-power-prefs` at start and after leaving the Advanced menu, and only the entry that
 would change something is shown:
