@@ -9,6 +9,7 @@
 #include "include/int_edp.h"
 #include "include/int_mem.h"
 #include "include/int_acpi.h"
+#include "include/int_rebar.h"
 
 
 #define APPLE_SET_OS_VENDOR  "Apple Inc."
@@ -328,11 +329,13 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 #define MENU_ROW        6       // MENU_ROWS rows: 6..(6+MENU_ROWS-1)
 #define MENU_ADV        MODE_COUNT          // menu entry 6 (Advanced menu): not a boot mode
 #define MENU_ITEMS      4                   // modes 1, 4, 5 + Advanced menu: what Up/Down walk over
-#define MENU_ROWS_BASE  7                   // rows reserved for a menu: the Advanced menu is the longest (2 + separator + 4)
-#define MENU_ROWS_FSB   9                   // same, plus the FakeSecureBoot toggle and its separator on top
-// Menu height. MENU_ROWS_FSB only when \FakeSecureBoot.efi exists on the ESP; efi_main sets it once, before the
-// frame is drawn, so without the file the screen is exactly as before. Every row macro below follows it.
-static UINTN gMenuRows = MENU_ROWS_BASE;
+#define MENU_ROWS_BASE  7                   // rows of the Advanced menu without the toggles (2 + separator + 4)
+#define MENU_ROWS_REBAR 9                   // plus the Resizable BAR toggle and its separator on top (always listed)
+#define MENU_ROWS_FSB   10                  // plus the FakeSecureBoot toggle as well
+// Menu height. The Advanced menu is the longest menu and always has the ReBAR toggle; MENU_ROWS_FSB only when
+// \FakeSecureBoot.efi exists on the ESP. efi_main sets it once, before the frame is drawn. Every row macro
+// below follows it.
+static UINTN gMenuRows = MENU_ROWS_REBAR;
 #define MENU_ROWS       (gMenuRows)
 #define MENU_SEP_ROW    (MENU_ROW + 3)      // between mode 5 and the Advanced menu
 #define MENU_SEP_TEXT   L"*************************"
@@ -354,8 +357,9 @@ static UINTN gMenuRows = MENU_ROWS_BASE;
 #define PR_VBT          8
 #define PR_DDI          9
 #define PR_ACPI         10
-#define PR_FSB          11
-#define PR_BOOT         12
+#define PR_REBAR        11
+#define PR_FSB          12
+#define PR_BOOT         13
 
 #define COUNTDOWN_SECS  5
 #define TICKS_PER_SEC   20      // one tick = one 50 ms wait
@@ -426,11 +430,12 @@ static CHAR16 *MenuName[MODE_COUNT] = {
     L"5 - Hybrid Boot (Intel + Radeon)",
 };
 
-// Defaults are kept in a small file in the root of the ESP; key X in the menu and the FakeSecureBoot
-// toggle in the Advanced menu rewrite it. Format (an older loader only reads the first character, so the
+// Defaults are kept in a small file in the root of the ESP; key X in the menu and the FakeSecureBoot /
+// Resizable BAR toggles in the Advanced menu rewrite it. Format (an older loader only reads the first character, so the
 // file stays compatible both ways):
 //     4            <- default mode (1, 4 or 5): the one with the x mark, started by the auto-boot timer
 //     FSB=1        <- FakeSecureBoot on (1) / off (0); no such line = off
+//     REBAR=1      <- Resizable BAR on (1) / off (0); no such line = off
 #define DEFAULT_FILE    L"\\t2gmux_default.txt"
 static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'4', L'5' };
 
@@ -439,15 +444,32 @@ static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'4', L'5' };
 // The toggle exists only while this file is in the root of the ESP.
 #define FSB_FILE        L"\\FakeSecureBoot.efi"
 #define FSB_KEY         "FSB="
+#define REBAR_KEY       "REBAR="
+
+// TRUE if Data holds "<Key>1" (Key = "FSB=" / "REBAR=") anywhere after the mode letter.
+static BOOLEAN
+DefaultFlag(const CHAR8 *Data, UINTN Size, const CHAR8 *Key, UINTN KeyLen)
+{
+    for (UINTN i = 0; i + KeyLen < Size; i++) {
+        UINTN k = 0;
+
+        while (k < KeyLen && Data[i + k] == Key[k])
+            k++;
+        if (k == KeyLen)
+            return (Data[i + k] == '1') ? TRUE : FALSE;
+    }
+    return FALSE;
+}
 
 static BOOT_MODE
-DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN *Fsb)
+DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN *Fsb, BOOLEAN *Rebar)
 {
     VOID *Data = NULL;
     UINTN Size = 0;
     BOOT_MODE Def = MODE_INTEL;                    // no file / unreadable: 4
 
     *Fsb = FALSE;                                  // no file / no FSB= line: off
+    *Rebar = FALSE;                                // no file / no REBAR= line: off
 
     if (!EFI_ERROR(_INT_ReadEspFile(BS, Image, DEFAULT_FILE, &Data, &Size)) && Data != NULL) {
         for (UINTN i = 0; i < Size; i++) {
@@ -462,18 +484,9 @@ DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN *Fsb)
             if (m < MODE_COUNT || (ch != ' ' && ch != '\r' && ch != '\n'))
                 break;                             // first non-blank character decides
         }
-        // FSB=<0|1> anywhere after that (the mode letter is never 'F', so it cannot match there)
-        for (UINTN i = 0; i + sizeof(FSB_KEY) - 1 < Size; i++) {
-            const CHAR8 *p = (const CHAR8 *)Data + i;
-            UINTN k = 0;
-
-            while (k < sizeof(FSB_KEY) - 1 && p[k] == (CHAR8)FSB_KEY[k])
-                k++;
-            if (k == sizeof(FSB_KEY) - 1) {
-                *Fsb = (p[k] == '1') ? TRUE : FALSE;
-                break;
-            }
-        }
+        // FSB=<0|1> / REBAR=<0|1> anywhere after that (the mode letter is never 'F' or 'R', so it cannot match there)
+        *Fsb = DefaultFlag((const CHAR8 *)Data, Size, (const CHAR8 *)FSB_KEY, sizeof(FSB_KEY) - 1);
+        *Rebar = DefaultFlag((const CHAR8 *)Data, Size, (const CHAR8 *)REBAR_KEY, sizeof(REBAR_KEY) - 1);
         _INT_FreePool(BS, Data);
     }
     if (Def == MODE_RADEON_INTEL)                  // mode 2 is not in the main menu
@@ -481,22 +494,25 @@ DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN *Fsb)
     return Def;
 }
 
-// Always writes both lines, so a mode change (X) never loses the FakeSecureBoot setting and the
-// other way round.
+// Always writes all lines, so a mode change (X) never loses the FakeSecureBoot / Resizable BAR settings and
+// the other way round.
 static EFI_STATUS
-DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, BOOLEAN Fsb)
+DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, BOOLEAN Fsb, BOOLEAN Rebar)
 {
-    CHAR8 Buf[8];
+    CHAR8 Buf[16];
+    UINTN n = 0;
 
-    Buf[0] = (CHAR8)ModeLetter[Mode];
-    Buf[1] = '\n';
-    Buf[2] = FSB_KEY[0];
-    Buf[3] = FSB_KEY[1];
-    Buf[4] = FSB_KEY[2];
-    Buf[5] = FSB_KEY[3];
-    Buf[6] = Fsb ? '1' : '0';
-    Buf[7] = '\n';
-    return _INT_WriteEspFile(BS, Image, DEFAULT_FILE, Buf, 8);
+    Buf[n++] = (CHAR8)ModeLetter[Mode];
+    Buf[n++] = '\n';
+    for (UINTN k = 0; k < sizeof(FSB_KEY) - 1; k++)
+        Buf[n++] = FSB_KEY[k];
+    Buf[n++] = Fsb ? '1' : '0';
+    Buf[n++] = '\n';
+    for (UINTN k = 0; k < sizeof(REBAR_KEY) - 1; k++)
+        Buf[n++] = REBAR_KEY[k];
+    Buf[n++] = Rebar ? '1' : '0';
+    Buf[n++] = '\n';
+    return _INT_WriteEspFile(BS, Image, DEFAULT_FILE, Buf, n);
 }
 
 // ---- required files per mode ----
@@ -867,6 +883,8 @@ MenuStep(UINTN Sel, UINTN Step, BOOLEAN IGpuPref)
 // ---- Advanced menu ----
 //   FakeSecureBoot: True / False      (only if \FakeSecureBoot.efi is on the ESP; Enter toggles it and
 //                                      saves it to t2gmux_default.txt at once)
+//   Resizable BAR: On / Off           (always listed; same: Enter toggles + saves. On = BAR0 of the Radeon is
+//                                      enlarged right before Windows starts, see _INT_RebarApply)
 //   *************************
 //   Switch to dGPU (delete gpu-power-prefs) + reboot     (hidden while the preference is not iGPU)
 //   Switch to iGPU (set gpu-power-prefs) + reboot        (hidden while the preference is iGPU)
@@ -876,7 +894,7 @@ MenuStep(UINTN Sel, UINTN Step, BOOLEAN IGpuPref)
 //   Reboot
 //   Power off
 //   Back                              (Esc does the same)
-typedef enum { ADV_TO_DGPU = 0, ADV_TO_IGPU, ADV_STD_INTEL, ADV_REBOOT, ADV_POWEROFF, ADV_BACK, ADV_FSB, ADV_COUNT } ADV_ITEM;
+typedef enum { ADV_TO_DGPU = 0, ADV_TO_IGPU, ADV_STD_INTEL, ADV_REBOOT, ADV_POWEROFF, ADV_BACK, ADV_FSB, ADV_REBAR, ADV_COUNT } ADV_ITEM;
 static CHAR16 *AdvText[ADV_COUNT] = {
     L"Switch to dGPU (delete gpu-power-prefs) + reboot",
     L"Switch to iGPU (set gpu-power-prefs) + reboot",
@@ -885,9 +903,10 @@ static CHAR16 *AdvText[ADV_COUNT] = {
     L"Power off",
     L"Back",
     L"FakeSecureBoot",                  // drawn as "FakeSecureBoot: True/False"
+    L"Resizable BAR",                   // drawn as "Resizable BAR: On/Off"
 };
 
-// Row of item i. Separators: after the head (the FakeSecureBoot toggle, Head = 1; Head = 0 without it)
+// Row of item i. Separators: after the head (the FakeSecureBoot / Resizable BAR toggles, Head = 1 or 2)
 // and after the switch group (items Head .. Group-1).
 static UINTN
 AdvRow(UINTN i, UINTN Head, UINTN Group)
@@ -907,15 +926,16 @@ ResetNow(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, EFI_RESET_TYPE Type)
 
 // Returns TRUE if "Standart Boot + Intel Secondary" was chosen (the caller starts mode 2),
 // FALSE on Back / Esc (back to the boot menu).
-// FsbAvail = \FakeSecureBoot.efi exists (the toggle is listed); *Fsb = the setting, flipped here and saved
-// together with the default mode Def.
+// FsbAvail = \FakeSecureBoot.efi exists (the toggle is listed); *Fsb / *Rebar = the settings, flipped here and
+// saved together with the default mode Def.
 static BOOLEAN
 AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTERFACE *ConIn,
-             _INT_SimpleTextGraphicsStruct *gs, EFI_HANDLE Image, BOOLEAN FsbAvail, BOOLEAN *Fsb, BOOT_MODE Def)
+             _INT_SimpleTextGraphicsStruct *gs, EFI_HANDLE Image, BOOLEAN FsbAvail, BOOLEAN *Fsb,
+             BOOLEAN *Rebar, BOOT_MODE Def)
 {
     ADV_ITEM Items[ADV_COUNT];
     UINTN N = 0;
-    UINTN Head = 0;                     // 1 when the FakeSecureBoot toggle is listed (a separator follows it)
+    UINTN Head = 0;                     // number of toggles on top: ReBAR, plus FakeSecureBoot (a separator follows)
     UINTN Group = 0;                    // number of switch entries (the separator follows them)
     UINTN Sel = 0;
     BOOLEAN Dirty = TRUE;
@@ -932,6 +952,7 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
             N = 0;
             if (FsbAvail)
                 Items[N++] = ADV_FSB;
+            Items[N++] = ADV_REBAR;
             Head = N;
             if (!P.Known || IsIGpu)
                 Items[N++] = ADV_TO_DGPU;       // hidden while the preference is not iGPU
@@ -952,6 +973,9 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
                 if (Items[i] == ADV_FSB)
                     UI_PRINT(gs, AdvRow(i, Head, Group), L"%s %s: %s",
                              (i == Sel) ? L">" : L" ", AdvText[ADV_FSB], *Fsb ? L"True" : L"False");
+                else if (Items[i] == ADV_REBAR)
+                    UI_PRINT(gs, AdvRow(i, Head, Group), L"%s %s: %s",
+                             (i == Sel) ? L">" : L" ", AdvText[ADV_REBAR], *Rebar ? L"On" : L"Off");
                 else
                     UI_PRINT(gs, AdvRow(i, Head, Group), L"%s %s",
                              (i == Sel) ? L">" : L" ", AdvText[Items[i]]);
@@ -973,6 +997,8 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
             }
             UI_PRINT(gs, HINT_ROW, (Items[Sel] == ADV_FSB)
                      ? L"Enter = toggle FakeSecureBoot (saved). Esc = back."
+                     : (Items[Sel] == ADV_REBAR)
+                     ? L"Enter = toggle Resizable BAR (saved). Esc = back."
                      : L"Up/Down + Enter. Esc = back. A GPU switch reboots the Mac.");
             UiRefreshHighlight(gs, AdvRow(Sel, Head, Group));
             Dirty = FALSE;
@@ -1010,11 +1036,21 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
                     EFI_STATUS DS;
 
                     *Fsb = (BOOLEAN)!*Fsb;
-                    DS = DefaultSave(BS, Image, Def, *Fsb);   // the in-memory value counts for this boot even if the save fails
+                    DS = DefaultSave(BS, Image, Def, *Fsb, *Rebar);   // the in-memory value counts for this boot even if the save fails
                     if (!EFI_ERROR(DS))
                         UI_STATUS(gs, L"FakeSecureBoot: %s (saved)", *Fsb ? L"True" : L"False");
                     else
                         UI_STATUS(gs, L"FakeSecureBoot: %s (NOT saved: %lX)", *Fsb ? L"True" : L"False", DS);
+                    Dirty = TRUE;
+                } else if (It == ADV_REBAR) {
+                    EFI_STATUS DS;
+
+                    *Rebar = (BOOLEAN)!*Rebar;
+                    DS = DefaultSave(BS, Image, Def, *Fsb, *Rebar);
+                    if (!EFI_ERROR(DS))
+                        UI_STATUS(gs, L"Resizable BAR: %s (saved)", *Rebar ? L"On" : L"Off");
+                    else
+                        UI_STATUS(gs, L"Resizable BAR: %s (NOT saved: %lX)", *Rebar ? L"On" : L"Off", DS);
                     Dirty = TRUE;
                 } else if (It == ADV_STD_INTEL) {
                     Start = TRUE;
@@ -1294,7 +1330,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     // X = save the highlighted mode as the default (marked x). Any key stops the auto-boot
     // timer; if no key is pressed for COUNTDOWN_SECS the default mode is started.
     BOOLEAN Fsb = FALSE;        // FakeSecureBoot setting (t2gmux_default.txt, line FSB=); toggled in the Advanced menu
-    BOOT_MODE Def = DefaultLoad(BS, ImageHandle, &Fsb);
+    BOOLEAN Rebar = FALSE;      // Resizable BAR setting (t2gmux_default.txt, line REBAR=); toggled in the Advanced menu
+    BOOT_MODE Def = DefaultLoad(BS, ImageHandle, &Fsb, &Rebar);
     BOOT_MODE Sel = Def;
     BOOLEAN IGpuPref = GpuPrefsIsIGpu(SystemTable->RuntimeServices);   // Hybrid Boot needs iGPU, Standart Boot needs dGPU
     BOOLEAN TimerOn = TRUE;
@@ -1350,7 +1387,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 if ((UINTN)Sel == MENU_ADV) {
                     UI_STATUS(&gs, L"Advanced menu cannot be the default");
                 } else {
-                    EFI_STATUS DS = DefaultSave(BS, ImageHandle, Sel, Fsb);
+                    EFI_STATUS DS = DefaultSave(BS, ImageHandle, Sel, Fsb, Rebar);
                     if (!EFI_ERROR(DS)) {
                         Def = Sel;
                         UI_STATUS(&gs, L"default saved: %s", MenuName[Def]);
@@ -1395,7 +1432,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             if ((UINTN)Sel == MENU_ADV) {
                 // not a boot mode: open the submenu, then come back to this menu
                 // (or start "Standart Boot + Intel Secondary" = mode 2)
-                if (AdvancedMenu(BS, SystemTable->RuntimeServices, ConIn, &gs, ImageHandle, FsbAvail, &Fsb, Def)) {
+                if (AdvancedMenu(BS, SystemTable->RuntimeServices, ConIn, &gs, ImageHandle, FsbAvail, &Fsb, &Rebar, Def)) {
                     Sel = MODE_RADEON_INTEL;
                     Chosen = TRUE;
                 }
@@ -1591,6 +1628,53 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         LOG(&gs, PR_ACPI, L"ACPI patch %s: %s (%lX)",
             AcpiFile + 1,                              // file name without the leading backslash
             AS == EFI_NOT_FOUND ? L"not found, skipped" : (EFI_ERROR(AS) ? L"FAILED" : L"OK"), AS);
+    }
+
+    // ---- Resizable BAR (Advanced menu): enlarge BAR0 of the Radeon right before Windows ----
+    // Last of the PCI work on purpose: it moves BAR0 (and re-points the GOP framebuffer if that sits in it), so
+    // nothing may configure the Radeon afterwards. The menu above has already been shown, so a bad result is
+    // undone by the next boot (switch it off in the Advanced menu). Mode 4 powers the Radeon off: nothing to do.
+    if (!Rebar) {
+        LOG(&gs, PR_REBAR, L"Resizable BAR: off");
+    } else if (DoRailOff) {
+        LOG(&gs, PR_REBAR, L"Resizable BAR: skipped (the Radeon rail is off in this mode)");
+    } else {
+        _INT_RebarResult Rb;
+
+        _INT_RebarApply(BS, ImageHandle, &Rb);
+        switch (Rb.Code) {
+        case _INT_REBAR_OK:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: OK, BAR0 %d -> %d MB at %lX (GOP moved: %d)",
+                (UINTN)(1u << Rb.OldExp), (UINTN)(1u << Rb.NewExp), Rb.NewBase, (UINTN)Rb.FbMoved);
+            break;
+        case _INT_REBAR_ALREADY:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: BAR0 is already %d MB (nothing larger fits)", (UINTN)(1u << Rb.OldExp));
+            break;
+        case _INT_REBAR_NO_GPU:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: skipped, Radeon not found");
+            break;
+        case _INT_REBAR_NO_CAP:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: skipped, the Radeon has no ReBAR capability for BAR0");
+            break;
+        case _INT_REBAR_NO_WINDOW:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: skipped, the root bridge has no MMIO window above 4 GB");
+            break;
+        case _INT_REBAR_NO_FIT:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: skipped, no free slot in %lX-%lX", Rb.WinLo, Rb.WinHi);
+            break;
+        case _INT_REBAR_BRIDGE:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: skipped, a bridge above the Radeon has no 64-bit window");
+            break;
+        case _INT_REBAR_OTHER:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: skipped, other prefetchable BARs behind the same bridges");
+            break;
+        case _INT_REBAR_VERIFY:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: read-back mismatch, old values restored");
+            break;
+        default:
+            LOG(&gs, PR_REBAR, L"Resizable BAR: PCI query failed, nothing changed");
+            break;
+        }
     }
 
     // ---- FakeSecureBoot (any mode, including 1): start the hook driver last, right before Windows ----

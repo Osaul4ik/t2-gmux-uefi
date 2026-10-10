@@ -191,7 +191,7 @@ EFI partition
 ├── SSDT_IGPU.aml                   <- mode 4
 ├── SSDT_IGPU_BRT.aml               <- mode 5
 ├── FakeSecureBoot.efi              <- optional, adds the FakeSecureBoot switch (Advanced menu)
-└── t2gmux_default.txt              <- created by the loader (key X, FakeSecureBoot switch)
+└── t2gmux_default.txt              <- created by the loader (key X, FakeSecureBoot / Resizable BAR switches)
 ```
 
 Only the files of the mode you use are needed. Restart and pick the mode in the loader menu. A mode with
@@ -220,7 +220,8 @@ Intel control panel: http://www.microsoft.com/store/apps/9PLFNLNT3G5G
 - The default mode is marked with an **x**. Press **X** to make the highlighted mode the default (it is
   saved in `t2gmux_default.txt` on the EFI partition; delete the file to go back to mode 4). X only saves,
   it does not start anything. The Advanced menu cannot be the default. The same file also holds the
-  FakeSecureBoot setting (line `FSB=1` / `FSB=0`); X keeps it.
+  FakeSecureBoot setting (line `FSB=1` / `FSB=0`) and the Resizable BAR setting (line `REBAR=1` / `REBAR=0`);
+  X keeps both.
 - The bottom of the screen lists the graphics cards the loader sees.
 
 ## Advanced menu
@@ -232,6 +233,7 @@ actions:
 | Entry | What it does |
 |-------|--------------|
 | FakeSecureBoot: True / False | **Only listed if `FakeSecureBoot.efi` is in the root of the EFI partition.** Enter (or Space) flips it and saves it at once to `t2gmux_default.txt`. With **True** the loader starts `FakeSecureBoot.efi` right before Windows, in any boot mode (see below). A separator follows it. |
+| Resizable BAR: On / Off | Always listed, right under FakeSecureBoot. Enter (or Space) flips it and saves it at once to `t2gmux_default.txt` (`REBAR=1`; no such line means **Off**). With **On** the loader enlarges BAR0 of the Radeon right before Windows starts (see below). A separator follows the two switches. |
 | Switch to dGPU (delete gpu-power-prefs) | Deletes the variable, back to the firmware default (the Radeon). The Mac then **reboots by itself**. |
 | Switch to iGPU (set gpu-power-prefs) | Writes `01 00 00 00`. With that value the firmware uses the Intel iGPU at the next boot. The Mac then **reboots by itself**. |
 | `*************************` | separator, not selectable |
@@ -256,6 +258,30 @@ reports; it does not turn real Secure Boot on.
 
 Because the Windows boot loader sees Secure Boot as enabled, Windows ignores **Test Mode** (`testsigning`) while the
 switch is **True**, and drivers that are only test-signed do not load. Set the switch to **False** to use them.
+
+### Resizable BAR
+
+The Mac firmware has no Resizable BAR setting: it leaves BAR0 of the Radeon (the VRAM window) at 256 MB, and
+Windows keeps what the firmware set up (GPU-Z: `Resizable BAR enabled in BIOS: No`). With the switch **On** the
+loader does what ReBarUEFI does during PCI enumeration, only afterwards, right before it starts Windows:
+
+1. finds the Radeon and the bridges above it, reads its Resizable BAR capability (BAR index 0),
+2. looks for a free slot, aligned to its size, in the MMIO window above 4 GB that the root bridge reports,
+   taking every BAR and bridge window the firmware programmed as taken,
+3. takes the **largest size the card supports that fits**, switches memory decoding off, writes the new size,
+   places BAR0 (and the other prefetchable BARs of the Radeon behind it) and the prefetchable windows of the
+   bridges above it, switches decoding on again,
+4. reads everything back; on any mismatch the old values are written back,
+5. if a GOP framebuffer lives inside the old BAR0 (modes 1 and 2: the Radeon drives the screen), it is re-pointed
+   to the new address, because bootmgr / winload draw straight into it.
+
+The result is the line `Resizable BAR: ...` on the progress screen, above `FakeSecureBoot: ...`: `OK, BAR0 256 ->
+8192 MB at <address> (GOP moved: n)`, `off`, or `skipped, <reason>` / `read-back mismatch, old values restored`
+(nothing is changed then). Mode 4 powers the Radeon off, so it is always skipped there. It is applied after the
+menu, so if a boot ever ends on a black screen, reboot, open the Advanced menu and set it to **Off**.
+
+Windows needs nothing else (Above 4G Decoding is already reported); after the boot GPU-Z should show
+`Resizable BAR enabled in BIOS: Yes` and BAR0 equal to the VRAM size.
 
 ### gpu-power-prefs
 

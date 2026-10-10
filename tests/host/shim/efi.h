@@ -3,7 +3,7 @@
 #define shim_efi_h
 #include <stdint.h>
 #include <stddef.h>
-typedef uint8_t UINT8; typedef uint16_t UINT16; typedef uint32_t UINT32; typedef uint64_t UINT64;
+typedef int32_t INT32; typedef uint8_t UINT8; typedef uint16_t UINT16; typedef uint32_t UINT32; typedef uint64_t UINT64;
 typedef uintptr_t UINTN; typedef uint8_t CHAR8; typedef uint16_t CHAR16; typedef int BOOLEAN;
 typedef void VOID; typedef UINTN EFI_STATUS; typedef void* EFI_HANDLE;
 #define TRUE 1

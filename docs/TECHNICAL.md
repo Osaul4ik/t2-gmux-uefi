@@ -99,6 +99,44 @@ saves `gRT->GetVariable` and replaces it with a hook that answers `SecureBoot` (
   checking `Data` / `*DataSize`, so a caller that probes the size of `SecureBoot` with a NULL buffer would fault
   inside it; that only matters before `ExitBootServices`.
 
+## Resizable BAR (Advanced menu, modes 1, 2, 5)
+
+`lib/int_rebar.c` (`_INT_RebarApply`), planning helpers in `lib/int_rebar_plan.c` (host tests:
+`tests/host/test_rebar.c`). The firmware enumerates PCI once and Windows keeps that assignment, so the BAR
+has to be resized before `bootx64_original.efi` starts. Order inside `efi_main`: menu -> AppleSetOs -> gmux /
+VBT / ACPI (modes 4, 5) -> **Resizable BAR** -> FakeSecureBoot -> `StartImage`. Nothing configures the Radeon after it.
+
+Topology on the MacBookPro16,1: root port 00:01.0 -> upstream port -> downstream port -> Radeon (Navi 14, BAR0 =
+VRAM aperture, 64-bit prefetchable; BAR2 = doorbells, 64-bit prefetchable; BAR5 = registers, 32-bit). The loader
+does not assume that depth: it follows `Secondary bus == child bus` upwards (up to 4 bridges).
+
+Steps (every PCI access is through `EFI_PCI_IO_PROTOCOL`, bridges included):
+
+1. Radeon = vendor 1002, class 03, header type 0, with extended capability 0x0015 and a BAR-index-0 entry.
+   Supported sizes = capability bits 4..31 (bit n = 2^(20+n) bytes), capped at 16 GB.
+2. Refuse (nothing written) if a bridge above has no 64-bit prefetchable window, or if anything else behind the
+   same root port has a prefetchable BAR / window of its own: those windows are replaced as a whole.
+3. Taken space = all memory BARs (size from `GetBarAttributes`, nothing is probed) and all bridge windows, except
+   the prefetchable BARs of the Radeon and the prefetchable windows of the bridges above it.
+4. Free space = the largest QWORD memory descriptor above 4 GB in `EFI_PCI_ROOT_BRIDGE_IO.Configuration()` of the
+   root bridge whose bus range contains the root port (a prefetchable aperture is preferred). The lowest slot
+   where BAR0 is aligned to its own size and the other prefetchable BARs follow it wins; sizes are tried from the
+   largest supported downwards.
+5. Write: command.MEM off -> ReBAR control (BAR size, bits 8..12) -> BAR0 is probed once (must read back exactly
+   the new size, else everything is undone) -> bridge prefetchable windows (0x24 / 0x28 / 0x2C, root port first)
+   -> BARs -> command restored. The command register is written as 16 bits (the status half is write-1-to-clear).
+6. Read back size, BARs, windows and the vendor ID; any mismatch writes all old values back.
+7. `EFI_GRAPHICS_OUTPUT_PROTOCOL.Mode->FrameBufferBase` that lies inside the old BAR0 is moved by the same
+   offset. bootmgr / winload write straight into that address; the GPU's scanout uses its own VRAM address and
+   is not affected. After this point text output through the firmware console may not show (a driver that cached
+   the old address), which is why the result line is the last thing printed before Windows.
+
+What is not known from the code alone and has to be seen on the machine: the size of the MMIO window above 4 GB
+that Apple's firmware gives the root bridge (`NO_FIT` prints it) and whether it matches what the DSDT builds from
+`M64B` / `M64L` (those are filled by the firmware at boot, not stored in the ACPI dump). If Windows' window is
+smaller than the one the root bridge reports, the Radeon gets Code 12. Sleep / resume was not tested either: if
+the firmware restores the old BAR values on wake, the driver sees a different BAR size than before sleep.
+
 ## Panel data from the dGPU (EDID substitution, modes 4, 5)
 
 Apple's EFI publishes panel data only for the Radeon (its GOP handle carries the EDID protocol);
