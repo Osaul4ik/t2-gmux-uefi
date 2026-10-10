@@ -2,7 +2,7 @@
 """Build SSDT_IGPU.aml (mode 4) or SSDT_IGPU_BRT.aml (mode 5) with iasl.
 
   python tools/make_ssdt_igpu.py -o SSDT_IGPU.aml                                 (mode 4)
-  python tools/make_ssdt_igpu.py --asl tools/SSDT_IGPU_BRT.asl -o SSDT_IGPU_BRT.aml   (brightness only, mode 5)
+  python tools/make_ssdt_igpu.py --asl tools/SSDT_IGPU_BRT.asl -o SSDT_IGPU_BRT.aml   (brightness + resume, mode 5)
 
 The .asl is only read, never written. Needs `iasl` (apt-get install acpica-tools).
 """

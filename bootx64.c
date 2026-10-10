@@ -358,7 +358,7 @@ typedef enum {
     MODE_RADEON = 0,            // 1: Standart Boot (clean boot, nothing is touched)
     MODE_RADEON_INTEL,          // 2: Standart Boot + Intel Secondary (standard boot + apple_set_os), Advanced menu
     MODE_INTEL,                 // 4: Efficient Boot (AppleSetOs + mux + Radeon OFF + DDI A 4 lanes + ACPI patch + built-in VBT)
-    MODE_INTEL_DGPU_ON,         // 5: Hybrid Boot: as 4, but the Radeon rail stays ON; ACPI patch = brightness only (no sleep fix)
+    MODE_INTEL_DGPU_ON,         // 5: Hybrid Boot: as 4, but the Radeon rail stays ON; ACPI patch = brightness + gmux re-route on resume
     MODE_COUNT
 } BOOT_MODE;
 
@@ -448,10 +448,10 @@ DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode)
 
 // ---- required files per mode ----
 // 4 = ACPI patch without VBT + built-in VBT completed from the panel and injected from UEFI: needs \SSDT_IGPU.aml.
-// 5 = same as 4 (Radeon stays ON), but with its own brightness-only SSDT: needs \SSDT_IGPU_BRT.aml.
+// 5 = same as 4 (Radeon stays ON), but with its own SSDT (brightness + resume re-route): needs \SSDT_IGPU_BRT.aml.
 // A mode whose files are missing cannot be chosen: the menu stays and shows a message.
 #define ACPI_FILE_BASE  L"\\SSDT_IGPU.aml"          // mode 4
-#define ACPI_FILE_BRT   L"\\SSDT_IGPU_BRT.aml"      // mode 5 (brightness only, no sleep fix)
+#define ACPI_FILE_BRT   L"\\SSDT_IGPU_BRT.aml"      // mode 5 (brightness + resume re-route)
 
 static BOOLEAN
 EspFileExists(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, const CHAR16 *Name)
@@ -1030,7 +1030,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     //   4 = Efficient Boot: AppleSetOs + mux->iGPU + Radeon rail OFF + DDI A 4 lanes + ACPI patch
     //       (SSDT_IGPU.aml) + the built-in VBT injected from UEFI (link from panel DPCD, timing from EDID)
     //   5 = Hybrid Boot: copy of 4, but the Radeon rail stays ON, and the ACPI patch is SSDT_IGPU_BRT.aml:
-    //       brightness (_BCM) only - no _PTS / _WAK, so sleep is left exactly as the firmware has it
+    //       brightness (_BCM) + _WAK (gmux re-route on resume); no _PTS, no rail code
     BOOLEAN DoSetOs = FALSE;   // 2 / 4 / 5: load AppleSetOs (the iGPU becomes visible)
     BOOLEAN DoSwitch = FALSE;  // 4 / 5: mux->iGPU + DDI A 4 lanes + VBT injection + ACPI patch
     BOOLEAN DoRailOff = FALSE; // 4: additionally Radeon rail OFF (5 leaves it ON)
@@ -1224,7 +1224,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     case MODE_INTEL_DGPU_ON:
         DoSetOs = TRUE;                                // as 4 ...
         DoSwitch = TRUE;
-        AcpiFile = ACPI_FILE_BRT;                      // ... brightness-only SSDT
+        AcpiFile = ACPI_FILE_BRT;                      // ... SSDT without rail code
         // DoRailOff stays FALSE: the Radeon is not switched off
         break;
     default:
@@ -1372,7 +1372,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             else
                 LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
             // ACPI patch (brightness via gmux) from the ESP root: mode 4 = SSDT_IGPU.aml,
-            // mode 5 = SSDT_IGPU_BRT.aml (brightness only).
+            // mode 5 = SSDT_IGPU_BRT.aml (brightness + resume re-route).
             AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, AcpiFile, &IR);
             _INT_FreePool(BS, RBuf);
         }

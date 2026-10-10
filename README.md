@@ -23,7 +23,7 @@ picks the default after 5 seconds), the loader prepares the GPUs and then starts
 |-----|------|--------------|
 | **1** | Standart Boot (Radeon only) | Clean boot without AppleSetOs or patches. Windows starts as if the loader was not there, on the Radeon. |
 | **4** | Efficient Boot (Intel only) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
-| **5** | Hybrid Boot (Intel + Radeon) | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate, brightness-only file: no sleep fix, sleep is left as the firmware has it. **Available only while `gpu-power-prefs` (NVRAM) is set to the iGPU value**; otherwise it is shown as `unavailable: Switch to iGPU` and cannot be started (see **Advanced menu**). |
+| **5** | Hybrid Boot (Intel + Radeon) | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate file: brightness plus a gmux re-route on resume, no Radeon rail code. **Available only while `gpu-power-prefs` (NVRAM) is set to the iGPU value**; otherwise it is shown as `unavailable: Switch to iGPU` and cannot be started (see **Advanced menu**). |
 | | `*************************` | separator, not selectable |
 | **6** | Advanced menu | Does not boot anything. Opens a submenu (see **Advanced menu**). |
 
@@ -44,7 +44,7 @@ How to get the files: see **Install** below (Claude makes them from your ACPI du
 
 - `SSDT_IGPU.aml` (mode 4, brightness and sleep; no VBT file is needed, the loader reads the same data from
   the panel itself: DPCD + EDID over AUX-A): [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md).
-- `SSDT_IGPU_BRT.aml` (mode 5, brightness only, no sleep fix):
+- `SSDT_IGPU_BRT.aml` (mode 5, brightness and resume re-route, no Radeon rail code):
   [docs/ACPI_PATCH_GUIDE_MODE5.md](docs/ACPI_PATCH_GUIDE_MODE5.md).
 
 ## Install
@@ -101,7 +101,7 @@ For **mode 5** use this message instead:
 Make SSDT_IGPU_BRT.aml for my MacBook Pro (T2) for mode 5.
 Follow docs/ACPI_PATCH_GUIDE_MODE5.md from the project archive step by step.
 Attached: DSDT and SSDT dumps (*.dat), the project archive.
-Brightness only, no sleep fix. Show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
+Brightness and resume re-route, no sleep code for the Radeon rail. Show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
 ```
 
 Claude returns the files for the chosen mode. They are built from your dumps and were not run on
@@ -220,14 +220,15 @@ The write is done from the UEFI loader and has not been tested on hardware. To u
 - **Mode 4:** after **Win + Ctrl + Shift + B** (graphics driver restart) the screen goes **black**. Do not
   use that shortcut in mode 4; restart the Mac to get the picture back.
 - **Mode 5:** the Radeon stays on, only the panel is moved to the iGPU. This mode is new and has not been
-  tested on hardware; until it has, avoid **Win + Ctrl + Shift + B** as in mode 4. Its ACPI patch has no
-  sleep fix, so after sleep the panel may stay dark (the firmware re-routes gmux on resume, see
-  [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md), section 5.2): restart instead of sleeping if that happens.
+  tested on hardware; until it has, avoid **Win + Ctrl + Shift + B** as in mode 4. Its ACPI patch re-routes
+  gmux to the iGPU on resume (the firmware puts the panel back on the Radeon, see
+  [docs/ACPI_PATCH_GUIDE_MODE5.md](docs/ACPI_PATCH_GUIDE_MODE5.md), section 5.2). That re-route is untested: if
+  the Mac hangs or powers off on resume, restart instead of sleeping and report it.
 
 ## Warnings
 
 - After mode **4** switches the Radeon off, do **not** power it back on from Windows.
-- Do not use `SSDT_IGPU.aml` under the name `SSDT_IGPU_BRT.aml`: it contains the sleep patch that mode 5
+- Do not use `SSDT_IGPU.aml` under the name `SSDT_IGPU_BRT.aml`: it contains the Radeon rail-off check that mode 5
   must not have.
 - If the screen is dark, restart the Mac and choose mode **1** (hold the key or press 1 at the menu) to
   boot normally on the Radeon.

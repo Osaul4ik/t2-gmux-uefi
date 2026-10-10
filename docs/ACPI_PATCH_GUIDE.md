@@ -33,7 +33,7 @@ The loader has four modes: 1, 4 and 5 in the main menu and 2 in the Advanced men
 | **4** | Efficient Boot (Intel only) | `\SSDT_IGPU.aml` | built into the loader, completed from the panel (DPCD / EDID), injected from UEFI; no file |
 | **5** | Hybrid Boot (Intel + Radeon) | `\SSDT_IGPU_BRT.aml` | as mode 4 |
 
-Mode **5** is mode 4 with the Radeon left ON and a brightness-only SSDT (no sleep fix). Its patch file is
+Mode **5** is mode 4 with the Radeon left ON and an SSDT with brightness and the resume re-route only (no rail-off check). Its patch file is
 built from `tools/SSDT_IGPU_BRT.asl` and has its own procedure: [ACPI_PATCH_GUIDE_MODE5.md](ACPI_PATCH_GUIDE_MODE5.md).
 Everything below in this file is about mode 4.
 

@@ -20,13 +20,14 @@ later failure the renames are reverted. The result is shown on screen. The GPU d
 What the SSDT contains (brightness, sleep) and how to rebuild it:
 [ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md). The `.asl` source and the generator are in `tools/`.
 
-### Mode 5: brightness-only patch
+### Mode 5: brightness + resume patch
 
 Mode 5 applies the same mechanism with its own file, `\SSDT_IGPU_BRT.aml` (source
 `tools/SSDT_IGPU_BRT.asl`, procedure [ACPI_PATCH_GUIDE_MODE5.md](ACPI_PATCH_GUIDE_MODE5.md)). The file defines
-only the new `_BCM`. It does not contain the names `XWAK` / `XPTS`, so the loader renames nothing in the
-DSDT: the only change to the firmware tables is `_BCM` -> `XBCM` in `SaSsdt`, plus the appended SSDT.
-Sleep / resume stays as the firmware has it.
+the new `_BCM` and the new `_WAK`. It contains the name `XWAK` but not `XPTS`, so the loader renames only the
+DSDT `_WAK` (and `_BCM` -> `XBCM` in `SaSsdt`); `_PTS` stays as the firmware has it. The new `_WAK` calls
+`XWAK`, then writes the gmux routes again (DDC, panel -> iGPU, external) and restores the brightness: after
+resume the firmware leaves the panel on the Radeon. There is no rail code, because the Radeon stays powered.
 
 ## Advanced menu: gpu-power-prefs (NVRAM)
 
