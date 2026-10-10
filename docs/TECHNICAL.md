@@ -28,18 +28,38 @@ only the new `_BCM`. It does not contain the names `XWAK` / `XPTS`, so the loade
 DSDT: the only change to the firmware tables is `_BCM` -> `XBCM` in `SaSsdt`, plus the appended SSDT.
 Sleep / resume stays as the firmware has it.
 
-## Advanced menu
+## Advanced menu: gpu-power-prefs (NVRAM)
 
-Menu entry 6 is not a boot mode. It opens `AdvancedMenu()` in `bootx64.c` with three entries:
+Menu entry 6 is not a boot mode. It opens `AdvancedMenu()` in `bootx64.c`, which uses the runtime
+services (`GetVariable` / `SetVariable`) on the Apple variable `gpu-power-prefs`, vendor GUID
+`fa4ce28d-b62f-4c99-9cc3-6815686e30f9`, attributes `0x07` (non-volatile + boot services + runtime, as macOS
+writes it). Entries: Switch to dGPU, Switch to iGPU, a separator, Standart Boot + Intel Secondary,
+Reboot, Power off, Back.
 
-- Standart Boot + Intel Secondary: returns TRUE to the caller, which starts mode 2 (standard boot + AppleSetOs).
-- Reboot: `ResetNow()` waits 1.5 s and calls `ResetSystem(EfiResetCold, ...)`.
-- Power off: the same `ResetNow()` with `EfiResetShutdown`.
+- Switch to iGPU: `SetVariable` with the 4 bytes `01 00 00 00`.
+- Switch to dGPU: `SetVariable` with size 0, which deletes the variable (an already absent variable is not
+  an error).
+- Both are verified by reading the variable back; the status line shows the result. After a verified
+  success `ResetNow()` waits 1.5 s and calls `ResetSystem(EfiResetCold, ...)` so the firmware reads the new
+  value. A failed write does not reboot. Reboot / Power off call the same function with `EfiResetCold` /
+  `EfiResetShutdown` without changing anything.
+- Visibility: value found with first byte `01` -> only Switch to dGPU; variable found with another value or
+  `EFI_NOT_FOUND` -> only Switch to iGPU; any other read error -> both.
+- Standart Boot + Intel Secondary makes `AdvancedMenu()` return TRUE: the caller starts mode 2
+  (standard boot + AppleSetOs). Back / Esc return FALSE.
 
-Esc returns FALSE (back to the boot menu). A failed reset shows an error and keeps the menu. Nothing else is
-touched: no gmux access, no ACPI, no NVRAM variables, no files. The Advanced menu is never saved as the default
-mode. The main menu walks over `MenuOrder[]` = modes 1, 4, 5 and the Advanced entry; mode 2 is not in it
-(a default file holding 2 falls back to mode 1; an unknown value falls back to mode 4).
+Mode 5 (Hybrid Boot) depends on the same variable: `GpuPrefsIsIGpu()` is true only when the variable is found
+and its first byte is `01`. The loader reads it once at start and again after returning from the Advanced menu
+(a successful switch reboots anyway). While it is false, mode 5 is drawn as `unavailable: Switch to iGPU`,
+`MenuStep()` skips it for Up/Down, key 5 shows a status message, and `ModeAvailable()` refuses it (this also
+covers the auto-boot default; the highlight then moves to mode 4). An unreadable variable counts as not
+confirmed, so mode 5 stays unavailable.
+
+The firmware reads the variable early at boot, so a change only applies after a restart; that is why a
+successful switch reboots at once. Nothing else is touched: no gmux access, no ACPI, no files. The Advanced
+menu is never saved as the default mode. The main menu walks over `MenuOrder[]` = modes 1, 4, 5 and the
+Advanced entry; mode 2 is not in it (a default file holding 2 falls back to mode 1; an unknown value falls
+back to mode 4).
 
 ## Panel data from the dGPU (EDID substitution, mode 4)
 

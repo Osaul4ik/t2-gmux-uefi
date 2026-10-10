@@ -23,7 +23,7 @@ picks the default after 5 seconds), the loader prepares the GPUs and then starts
 |-----|------|--------------|
 | **1** | Standart Boot (Radeon only) | Clean boot without AppleSetOs or patches. Windows starts as if the loader was not there, on the Radeon. |
 | **4** | Efficient Boot (Intel only) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
-| **5** | Hybrid Boot (Intel + Radeon) | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate, brightness-only file: no sleep fix, sleep is left as the firmware has it. |
+| **5** | Hybrid Boot (Intel + Radeon) | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate, brightness-only file: no sleep fix, sleep is left as the firmware has it. **Available only while `gpu-power-prefs` (NVRAM) is set to the iGPU value**; otherwise it is shown as `unavailable: Switch to iGPU` and cannot be started (see **Advanced menu**). |
 | | `*************************` | separator, not selectable |
 | **6** | Advanced menu | Does not boot anything. Opens a submenu (see **Advanced menu**). |
 
@@ -180,16 +180,38 @@ Intel control panel: http://www.microsoft.com/store/apps/9PLFNLNT3G5G
 
 ## Advanced menu
 
-Entry **6** opens a submenu instead of booting:
+Entry **6** opens a submenu instead of booting. It edits the Apple NVRAM variable `gpu-power-prefs`
+(vendor GUID `fa4ce28d-b62f-4c99-9cc3-6815686e30f9`), the one `nvram` writes in macOS, and holds the other
+actions:
 
 | Entry | What it does |
 |-------|--------------|
+| Switch to dGPU (delete gpu-power-prefs) | Deletes the variable, back to the firmware default (the Radeon). The Mac then **reboots by itself**. |
+| Switch to iGPU (set gpu-power-prefs) | Writes `01 00 00 00`. With that value the firmware uses the Intel iGPU at the next boot. The Mac then **reboots by itself**. |
+| `*************************` | separator, not selectable |
 | Standart Boot + Intel Secondary | Standard boot + the apple_set_os patch (mode 2). Windows sees both GPUs, the Radeon stays primary and the Intel HD is a secondary adapter. |
 | Reboot | Restarts the Mac at once (cold reset). |
 | Power off | Shuts the Mac down at once. |
+| Back | Returns to the boot menu (Esc does the same). |
 
-Esc returns to the boot menu. If the reset or shutdown call returns, the status line shows the error and the
-menu stays.
+The loader reads `gpu-power-prefs` at start and after leaving the Advanced menu, and only the entry that
+would change something is shown:
+
+- preference = **iGPU** (variable present, first byte `01`): only **Switch to dGPU** is listed, and
+  **Hybrid Boot** (mode 5) is available;
+- preference = **dGPU** (variable absent or another value): only **Switch to iGPU** is listed, and
+  **Hybrid Boot** is shown as `unavailable: Switch to iGPU`, the highlight skips it, key **5** only shows a
+  message and the auto-boot default cannot start it;
+- variable cannot be read at all: both switch entries are listed and **Hybrid Boot** stays unavailable.
+
+A line under the entries shows the current value. After a switch the status line shows the result (checked
+by reading the variable back). The firmware reads the variable at boot, so after a successful switch the
+loader shows the result for about a second and a half and reboots the Mac; **Hybrid Boot** is then available
+in the menu that follows. If the write fails there is **no** reboot and the menu stays. If the reset itself
+fails, the status line says so.
+
+The write is done from the UEFI loader and has not been tested on hardware. To undo it, use
+**Switch to dGPU**, or reset the NVRAM of the Mac (Cmd + Option + P + R while powering on).
 
 ## What to expect
 
