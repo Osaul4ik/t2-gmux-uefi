@@ -1,10 +1,10 @@
-# Instructions for Claude: generate the mode 5 ACPI patch (brightness + hide the Radeon display)
+# Instructions for Claude: generate the mode 5 ACPI patch (brightness only)
 
 This file is written for Claude (or any AI agent) that is asked to build `SSDT_IGPU_BRT.aml`, the ACPI
 patch of **mode 5** of the `t2-gmux-uefi` loader. It is not a user manual. Follow it as a procedure, in
 order, and report what you actually verified.
 
-Mode 5 is mode 4 with the Radeon left powered ON, and it patches **brightness** and hides the Radeon's display from its driver (section 5a). Sleep is not
+Mode 5 is mode 4 with the Radeon left powered ON, and it patches **brightness only**. Sleep is not
 touched. For the patch file of mode 4 use [ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md); do not
 mix the two guides.
 
@@ -29,7 +29,7 @@ that machine's own ACPI dump (section 4 and section 8).
 | Key | Mode | ACPI patch file (ESP root) | VBT | Radeon rail |
 |-----|------|----------------------------|-----|-------------|
 | **4** | Integrated gfx + built-in VBT | `\SSDT_IGPU.aml` (brightness + sleep) | built into the loader, completed from the panel | switched OFF |
-| **5** | Integrated gfx + built-in VBT, Radeon ON | `\SSDT_IGPU_BRT.aml` (brightness + Radeon display hidden) | built into the loader, completed from the panel | left ON |
+| **5** | Integrated gfx + built-in VBT, Radeon ON | `\SSDT_IGPU_BRT.aml` (brightness only) | built into the loader, completed from the panel | left ON |
 
 Mode 5 does everything mode 4 does (AppleSetOs, gmux panel -> iGPU, VBT injection, DDI A 4 lanes) except
 the Radeon rail OFF. Its ACPI patch is a separate file with its own name.
@@ -48,7 +48,7 @@ In mode 5 the loader does this in memory before Windows starts:
 3. It appends the SSDT to a copy of the XSDT and republishes the RSDP. If a later step fails it reverts
    the rename. If a table with the same OEM table id and length is already installed it skips the patch.
 
-So the SSDT defines a **new** `_BCM` that calls the renamed original `XBCM` (and the gmux `ABCM`), plus the two stubs of section 5a. Nothing else.
+So the SSDT defines a **new** `_BCM` that calls the renamed original `XBCM`, and nothing else.
 
 ## 3. Prerequisites
 
@@ -113,18 +113,6 @@ Add matching `External (...)` lines at the top of the definition block for every
 (`DD1F`, `DD1F.XBCM`, `GFX0.ABCM`). `XBCM` is declared under `DD1F` because the loader renames `_BCM` inside
 `SaSsdt`, where `DD1F` lives.
 
-## 5a. Hiding the Radeon's display (`GFX0._DOD`, `LCD._ADR`)
-
-Why: with the Radeon powered the Windows AMD driver claims the built-in panel (`GFX0._DOD` lists the LCD `0x0110`
-and the LCD child exists) although the gmux routes the panel to the Intel GPU. Windows then shows the panel on
-the AMD adapter and the screen is black. Fix: the Radeon stays a second GPU with no display.
-
-The loader renames in the Radeon table (OEM id `PEG0GFX0`, SSDT7 of the reference dumps) `GFX0._DOD` to `XDOD` and the
-LCD child's method `_ADR` (`Return (0x0110)`) to `XADR`, and only if the SSDT mentions those names. The SSDT defines
-`GFX0._DOD` returning an empty package and `LCD._ADR` returning `0x0FFF` (no display id). The names `XDOD` / `XADR`
-reach the AML through two never-called methods (`T2XD`, `T2XA`) that test them with `CondRefOf`, because iasl drops
-unused `External` lines. ATIF is not touched.
-
 ## 6. What is deliberately NOT in this file
 
 | Left out | Why |
@@ -153,17 +141,17 @@ Check, and quote the evidence:
 
 - `iasl` printed `Compilation successful. 0 Errors` for the file. Read warnings and remarks, do not hide
   them.
-- The disassembly contains `_BCM`, `GFX0._DOD`, `LCD._ADR` and the two never-called `T2XD` / `T2XA`: no `_PTS`, no `_WAK`, no `_INI`, no `T2GR`.
+- The disassembly contains `_BCM` and nothing else defined: no `_PTS`, no `_WAK`, no `_INI`, no `T2GR`.
 - The raw AML contains none of the names the loader looks for:
 
 ```
 python3 -c "d=open('$OUT/SSDT_IGPU_BRT.aml','rb').read(); print({n:d.count(n.encode()) for n in ('_PTS','_WAK','XPTS','XWAK','_INI')})"
 ```
 
-  All counts must be 0. (`XBCM` twice, `_BCM` once, `XDOD` / `XADR` once each, that is expected.)
+  Every count must be 0. (`XBCM` appears twice and `_BCM` once, that is expected.)
 - Every path in the `.dsl` exists in the dumps from section 4 (grep each one).
 - The OEM table id is `IGPUBRT`, so the file does not collide with `SSDT_IGPU.aml` (`IGPUBCM`).
-- The reference build was 472 bytes.
+- The reference build was 226 bytes.
 
 Deliver the file and say plainly that it was not run on hardware. On the target it goes to the ESP root,
 named exactly:

@@ -12,9 +12,9 @@
 #define IGPU_PCI_BAR0      0x10
 #define IGPU_DDI_BUF_CTL_A 0x64000   // GTTMMADR (BAR0) offset
 #define DDI_A_4_LANES      (1u << 4)
-#define OPREGION_ASLE_OFF  0x300   // mailbox 3 (ASLE); 0x100 is mailbox 1 (display lists)
-#define ASLE_RVDA_OFF      186   // offset of rvda (u64) inside the ASLE struct (OpRegion+0x3BA)
-#define ASLE_RVDS_OFF      194   // offset of rvds (u32) (OpRegion+0x3C2)
+#define OPREGION_ASLE_OFF  0x100
+#define ASLE_RVDA_OFF      130   // offset of rvda (u64) inside the ASLE struct
+#define ASLE_RVDS_OFF      138   // offset of rvds (u32)
 
 static BOOLEAN IsVbt(const UINT8* p)
 {
@@ -205,11 +205,17 @@ static EFI_STATUS InjectBuf(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
         return EFI_BUFFER_TOO_SMALL;
     }
 
-    // The Intel driver prefers a valid VBT behind ASLE.rvda/rvds over mailbox 4, so a non-empty
-    // rvda makes this injection invisible to it. It is cleared after the VBT is written (below).
-    UINT64 rvda = _INT_Rd64(op + OPREGION_ASLE_OFF + ASLE_RVDA_OFF);
-    UINT32 rvds = _INT_Rd32(op + OPREGION_ASLE_OFF + ASLE_RVDS_OFF);
-    S("Inject: ASLE rvda=0x"); HX(rvda, 16); S(" rvds="); DC(rvds); NL();
+    // i915 prefers a valid VBT behind ASLE.rvda/rvds over mailbox 4, so a non-empty
+    // rvda would make this injection invisible to it. Report only, do not touch.
+    {
+        UINT64 rvda = _INT_Rd64(op + OPREGION_ASLE_OFF + ASLE_RVDA_OFF);
+        UINT32 rvds = _INT_Rd32(op + OPREGION_ASLE_OFF + ASLE_RVDS_OFF);
+        S("Inject: ASLE rvda=0x"); HX(rvda, 16); S(" rvds="); DC(rvds); NL();
+        if (rvda != 0 && rvds != 0) {
+            S("Inject: WARNING rvda/rvds are set - a driver that prefers them "
+              "will ignore the mailbox 4 VBT written here"); NL();
+        }
+    }
 
     if (Size < 48 || !IsVbt(v)) {
         S("Inject: data is not a VBT (no $VBT signature)"); NL();
@@ -236,16 +242,6 @@ static EFI_STATUS InjectBuf(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 
     S("Inject: wrote "); DC(vsz); S(" bytes at OpRegion+0x400, readback ");
     S(ok ? "OK" : "MISMATCH (write did not stick)"); NL();
-
-    // A VBT behind rvda/rvds would be preferred over the one just written: clear both so the
-    // driver falls back to mailbox 4.
-    if (ok && (rvda != 0 || rvds != 0)) {
-        UINT8* rp = op + OPREGION_ASLE_OFF + ASLE_RVDA_OFF;   // rvda (8) + rvds (4) are contiguous
-        for (UINTN i = 0; i < 12; i++) rp[i] = 0;
-        BOOLEAN cleared = (_INT_Rd64(op + OPREGION_ASLE_OFF + ASLE_RVDA_OFF) == 0 &&
-                           _INT_Rd32(op + OPREGION_ASLE_OFF + ASLE_RVDS_OFF) == 0);
-        S("Inject: rvda/rvds were set, cleared: "); S(cleared ? "OK" : "FAILED (write did not stick)"); NL();
-    }
 
     return ok ? EFI_SUCCESS : EFI_DEVICE_ERROR;
 }

@@ -20,13 +20,11 @@ later failure the renames are reverted. The result is shown on screen. The GPU d
 What the SSDT contains (brightness, sleep) and how to rebuild it:
 [ACPI_PATCH_GUIDE.md](ACPI_PATCH_GUIDE.md). The `.asl` source and the generator are in `tools/`.
 
-### Mode 5: brightness patch + Radeon display hidden
+### Mode 5: brightness-only patch
 
 Mode 5 applies the same mechanism with its own file, `\SSDT_IGPU_BRT.aml` (source
 `tools/SSDT_IGPU_BRT.asl`, procedure [ACPI_PATCH_GUIDE_MODE5.md](ACPI_PATCH_GUIDE_MODE5.md)). The file defines
-the new `_BCM`, a `GFX0._DOD` returning an empty package and an `LCD._ADR` returning `0x0FFF`; the loader renames the
-original Radeon `_DOD` / LCD `_ADR` to `XDOD` / `XADR` (table `PEG0GFX0`). Without this the AMD driver claims the panel and Windows
-shows it on the AMD adapter while the gmux routes it to the Intel GPU. It does not contain the names `XWAK` / `XPTS`, so the loader renames nothing in the
+only the new `_BCM`. It does not contain the names `XWAK` / `XPTS`, so the loader renames nothing in the
 DSDT: the only change to the firmware tables is `_BCM` -> `XBCM` in `SaSsdt`, plus the appended SSDT.
 Sleep / resume stays as the firmware has it.
 
