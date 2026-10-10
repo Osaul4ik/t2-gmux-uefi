@@ -73,6 +73,34 @@ static BOOLEAN HasName(const UINT8* t, UINTN len, const char* nm)
     return FALSE;
 }
 
+// Locate the Radeon LCD child's method _ADR (AML: 0x14 <PkgLength> '_ADR' 0x08 'Return (0x0110)' =
+// A4 0B 10 01). The other raw "_ADR" in the table are Name objects, so this must match the whole
+// tail. Returns the offset of the name, or 0 unless there is exactly one match.
+static UINTN FindLcdAdr(const UINT8* t, UINTN len)
+{
+    static const UINT8 tail[5] = { 0x08, 0xA4, 0x0B, 0x10, 0x01 };
+    UINTN pos = 0, n = 0;
+    for (UINTN i = ACPI_HDR_SIZE + 3; i + 9 <= len; i++) {
+        if (!SigEq(t + i, "_ADR", 4)) continue;
+        if (!(t[i - 2] == 0x14 || t[i - 3] == 0x14)) continue;
+        BOOLEAN m = TRUE;
+        for (UINTN k = 0; k < 5; k++)
+            if (t[i + 4 + k] != tail[k]) { m = FALSE; break; }
+        if (m) { pos = i; n++; }
+    }
+    return n == 1 ? pos : 0;
+}
+
+// Write the first byte of a 4-byte AML name, fix the table checksum, verify the write stuck.
+static BOOLEAN SetNameByte(UINT8* T, UINT32 Len, UINTN Off, UINT8 Ch)
+{
+    volatile UINT8* p = T + Off;
+    *p = Ch;
+    T[ACPI_HDR_CSUM] = 0;
+    T[ACPI_HDR_CSUM] = (UINT8)(0 - Sum8(T, Len));
+    return (BOOLEAN)(*p == Ch && Sum8(T, Len) == 0);
+}
+
 // DSDT address from the FADT ("FACP"): X_Dsdt (+140) if present, else Dsdt (+40).
 static UINT8* FindDsdt(UINT8* Xsdt, UINTN N)
 {
@@ -141,6 +169,7 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
 
     // ---- 3. find SaSsdt, check we are not installed already ----
     UINT8* Sa = NULL;
+    UINT8* Gx = NULL;     // Radeon table "PEG0GFX0"
     for (UINTN i = 0; i < N; i++) {
         UINT8* T = (UINT8*)(UINTN)_INT_Rd64(Xsdt + ACPI_HDR_SIZE + i * 8);
         if (!T || !SigEq(T, "SSDT", 4)) continue;
@@ -152,6 +181,8 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
         }
         if (SigEq(T + ACPI_HDR_OEMTID, "SaSsdt", 6))
             Sa = T;
+        if (SigEq(T + ACPI_HDR_OEMTID, "PEG0GFX0", 8))
+            Gx = T;
     }
     if (!Sa) {
         S("  SaSsdt not found in XSDT"); NL();
@@ -198,6 +229,36 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
             (WantWak && (CntW != 1 || OffW == 0 || CntWX != 0)) ||
             (WantPts && (CntP != 1 || OffP == 0 || CntPX != 0))) {
             S("  unexpected DSDT layout, not patched"); NL();
+            _INT_FreePool(BS, FileData);
+            return EFI_UNSUPPORTED;
+        }
+    }
+
+    // ---- 3c. Radeon table renames. The SSDT may hide the Radeon's display from its driver: the
+    //          original GFX0._DOD (display list) becomes XDOD and the LCD child's _ADR becomes XADR,
+    //          the SSDT defines empty replacements. Only done for names the SSDT mentions. ----
+    BOOLEAN WantDod = HasName(File, FileSize, "XDOD");
+    BOOLEAN WantLcd = HasName(File, FileSize, "XADR");
+    UINT32 GxLen = 0;
+    UINTN OffD = 0, OffA = 0;
+    if (WantDod || WantLcd) {
+        UINTN CntD = 0, CntDX = 0;
+        if (!Gx) {
+            S("  PEG0GFX0 (Radeon table) not found in XSDT, not patched"); NL();
+            _INT_FreePool(BS, FileData);
+            return EFI_NOT_FOUND;
+        }
+        GxLen = _INT_Rd32(Gx + ACPI_HDR_LEN);
+        OffD = FindBcm(Gx, GxLen, "_DOD", &CntD);
+        FindBcm(Gx, GxLen, "XDOD", &CntDX);
+        OffA = FindLcdAdr(Gx, GxLen);
+        S("  PEG0GFX0 at "); HX((UINT64)(UINTN)Gx, 8); S(" len "); DC(GxLen);
+        S(", _DOD x"); DC(CntD); S(" at +"); HX(OffD, 4); S(", XDOD x"); DC(CntDX);
+        S(", LCD _ADR at +"); HX(OffA, 4); NL();
+        if (Sum8(Gx, GxLen) != 0 ||
+            (WantDod && (CntD != 1 || OffD == 0 || CntDX != 0)) ||
+            (WantLcd && OffA == 0)) {
+            S("  unexpected PEG0GFX0 layout, not patched"); NL();
             _INT_FreePool(BS, FileData);
             return EFI_UNSUPPORTED;
         }
@@ -267,9 +328,38 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
         }
     }
 
+    UINT8 OldGxCsum = 0;
+    if (WantDod || WantLcd) {
+        BOOLEAN GxOk = TRUE;
+        OldGxCsum = Gx[ACPI_HDR_CSUM];
+        if (WantDod) GxOk = (BOOLEAN)(SetNameByte(Gx, GxLen, OffD, 'X') && GxOk);
+        if (WantLcd) GxOk = (BOOLEAN)(SetNameByte(Gx, GxLen, OffA, 'X') && GxOk);
+        if (!GxOk) {
+            if (WantDod) Gx[OffD] = '_';
+            if (WantLcd) Gx[OffA] = '_';
+            Gx[ACPI_HDR_CSUM] = OldGxCsum;
+            if (WantWak || WantPts) {
+                if (WantWak) Ds[OffW] = '_';
+                if (WantPts) Ds[OffP] = '_';
+                Ds[ACPI_HDR_CSUM] = OldDsCsum;
+            }
+            Name4[0] = '_';
+            Sa[ACPI_HDR_CSUM] = OldCsum;
+            S("  PEG0GFX0 memory is not writable, aborted (nothing changed)"); NL();
+            BS->FreePool(NewSsdt); BS->FreePool(NewXsdt); BS->FreePool(NewRsdp);
+            _INT_FreePool(BS, FileData);
+            return EFI_ACCESS_DENIED;
+        }
+    }
+
     // ---- 6. publish the new RSDP (config table), best-effort update of the old one ----
     Status = BS->InstallConfigurationTable(&acpi20, NewRsdp);
     if (EFI_ERROR(Status)) {
+        if (WantDod || WantLcd) {
+            if (WantDod) Gx[OffD] = '_';
+            if (WantLcd) Gx[OffA] = '_';
+            Gx[ACPI_HDR_CSUM] = OldGxCsum;
+        }
         Name4[0] = '_';
         Sa[ACPI_HDR_CSUM] = OldCsum;
         if (WantWak || WantPts) {
@@ -299,6 +389,8 @@ EFI_STATUS _INT_AcpiApplyPatch(EFI_BOOT_SERVICES* BS, EFI_SYSTEM_TABLE* ST,
     }
 
     S("  OK: _BCM->XBCM"); if (WantWak) S(", _WAK->XWAK"); if (WantPts) S(", _PTS->XPTS");
+    if (WantDod) S(", GFX0._DOD->XDOD");
+    if (WantLcd) S(", LCD._ADR->XADR");
     S(", new SSDT at "); HX((UINT64)(UINTN)NewSsdt, 8);
     S(", new XSDT at "); HX((UINT64)(UINTN)NewXsdt, 8); S(", entries "); DC(N + 1); NL();
 
