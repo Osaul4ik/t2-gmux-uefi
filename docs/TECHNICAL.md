@@ -116,8 +116,11 @@ Steps (every PCI access is through `EFI_PCI_IO_PROTOCOL`, bridges included):
    Supported sizes = capability bits 4..31 (bit n = 2^(20+n) bytes), capped at 16 GB.
 2. Refuse (nothing written) if a bridge above has no 64-bit prefetchable window, or if anything else behind the
    same root port has a prefetchable BAR / window of its own: those windows are replaced as a whole.
-3. Taken space = all memory BARs (size from `GetBarAttributes`, nothing is probed) and all bridge windows, except
-   the prefetchable BARs of the Radeon and the prefetchable windows of the bridges above it.
+3. Sizes: the 64-bit BARs of the Radeon are probed (command.MEM off, all ones written, mask read back, old
+   value restored) and that size replaces the `GetBarAttributes` one when they differ. Apple's firmware reports
+   1 MB for BAR2 (really 2 MB), which made every bridge window 1 MB too short (Windows Code 12, status
+   `C0000018`). Taken space = all memory BARs of the other devices (size from `GetBarAttributes`) and all bridge
+   windows, except the prefetchable BARs of the Radeon and the prefetchable windows of the bridges above it.
 4. Free space = the largest QWORD memory descriptor above 4 GB in `EFI_PCI_ROOT_BRIDGE_IO.Configuration()` of the
    root bridge whose bus range contains the root port (a prefetchable aperture is preferred). The lowest slot
    where BAR0 is aligned to its own size and the other prefetchable BARs follow it wins; sizes are tried from the
@@ -130,6 +133,8 @@ Steps (every PCI access is through `EFI_PCI_IO_PROTOCOL`, bridges included):
    offset. bootmgr / winload write straight into that address; the GPU's scanout uses its own VRAM address and
    is not affected. After this point text output through the firmware console may not show (a driver that cached
    the old address), which is why the result line is the last thing printed before Windows.
+
+The result is shown on screen only; no log file is written (the `t2gmux_rebar.txt` of the diagnostic builds is gone).
 
 What is not known from the code alone and has to be seen on the machine: the size of the MMIO window above 4 GB
 that Apple's firmware gives the root bridge (`NO_FIT` prints it) and whether it matches what the DSDT builds from

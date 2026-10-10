@@ -1,6 +1,6 @@
-# GMUX_Control v0.92
+# GMUX_Control v0.93
 
-A small UEFI loader for the **MacBook Pro 2019 with the T2 chip** (Intel iGPU + AMD Radeon). It starts
+A small UEFI loader for the **MacBooks t2* (Intel iGPU + AMD Radeon). It starts
 before Windows (Boot Camp) and lets you choose which GPU Windows will use: the AMD Radeon as usual, or
 the Intel integrated graphics (iGPU).
 
@@ -266,8 +266,9 @@ Windows keeps what the firmware set up (GPU-Z: `Resizable BAR enabled in BIOS: N
 loader does what ReBarUEFI does during PCI enumeration, only afterwards, right before it starts Windows:
 
 1. finds the Radeon and the bridges above it, reads its Resizable BAR capability (BAR index 0),
-2. looks for a free slot, aligned to its size, in the MMIO window above 4 GB that the root bridge reports,
-   taking every BAR and bridge window the firmware programmed as taken,
+2. measures the real size of every 64-bit BAR of the Radeon (the firmware's own number is not trusted, see
+   below), then looks for a free slot, aligned to its size, in the MMIO window above 4 GB that the root bridge
+   reports, taking every BAR and bridge window the firmware programmed as taken,
 3. takes the **largest size the card supports that fits**, switches memory decoding off, writes the new size,
    places BAR0 (and the other prefetchable BARs of the Radeon behind it) and the prefetchable windows of the
    bridges above it, switches decoding on again,
@@ -277,11 +278,17 @@ loader does what ReBarUEFI does during PCI enumeration, only afterwards, right b
 
 The result is the line `Resizable BAR: ...` on the progress screen, above `FakeSecureBoot: ...`: `OK, BAR0 256 ->
 8192 MB at <address> (GOP moved: n)`, `off`, or `skipped, <reason>` / `read-back mismatch, old values restored`
-(nothing is changed then). Mode 4 powers the Radeon off, so it is always skipped there. It is applied after the
+(nothing is changed then). `size fix: n` is added to the OK line when the real size of n BARs differed
+from what the firmware reported. Nothing is written to the EFI partition for this feature. Mode 4 powers the Radeon off, so it is always skipped there. It is applied after the
 menu, so if a boot ever ends on a black screen, reboot, open the Advanced menu and set it to **Off**.
 
 Windows needs nothing else (Above 4G Decoding is already reported); after the boot GPU-Z should show
 `Resizable BAR enabled in BIOS: Yes` and BAR0 equal to the VRAM size.
+
+**Why the sizes are measured.** On the MacBookPro16,1 (Radeon Pro 5300M) the firmware reports 1 MB for the 2 MB
+doorbell BAR (BAR2). Bridge windows sized from that number end 1 MB short, the upper half of BAR2 lies outside
+them, and Windows refuses to start the Radeon (Device Manager Code 12, problem status `C0000018`, whatever the
+BAR0 size). Since v0.93 the loader reads the real size from the BAR itself and sizes the windows from that.
 
 ### gpu-power-prefs
 
