@@ -64,7 +64,7 @@ menu is never saved as the default mode. The main menu walks over `MenuOrder[]` 
 Advanced entry; mode 2 is not in it (a default file holding 2 falls back to mode 1; an unknown value falls
 back to mode 4).
 
-## Panel data from the dGPU (EDID substitution, mode 4)
+## Panel data from the dGPU (EDID substitution, modes 4, 5)
 
 Apple's EFI publishes panel data only for the Radeon (its GOP handle carries the EDID protocol);
 the iGPU has an empty VBT mailbox. After the built-in VBT is injected, the loader looks for an

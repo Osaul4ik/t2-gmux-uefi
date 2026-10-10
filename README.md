@@ -1,4 +1,4 @@
-# GMUX_Control v0.9
+# GMUX_Control v0.91
 
 A small UEFI loader for the **MacBook Pro 2019 with the T2 chip** (Intel iGPU + AMD Radeon). It starts
 before Windows (Boot Camp) and lets you choose which GPU Windows will use: the AMD Radeon as usual, or
@@ -22,12 +22,22 @@ picks the default after 5 seconds), the loader prepares the GPUs and then starts
 | Key | Mode | What it does |
 |-----|------|--------------|
 | **1** | Standart Boot (Radeon only) | Clean boot without AppleSetOs or patches. Windows starts as if the loader was not there, on the Radeon. **Available only while `gpu-power-prefs` (NVRAM) is not set to the iGPU value**; with the iGPU preference it is shown as `unavailable: Switch to dGPU` and cannot be started (see **Advanced menu**). |
-| **4** | Efficient Boot (Intel only) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
-| **5** | Hybrid Boot (Intel + Radeon) | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate file: brightness plus a gmux re-route on resume, no Radeon rail code. **Available only while `gpu-power-prefs` (NVRAM) is set to the iGPU value**; otherwise it is shown as `unavailable: Switch to iGPU` and cannot be started (see **Advanced menu**). |
+| **4** | Efficient Boot (Intel only) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the **Radeon is powered off**, an ACPI patch fixes brightness and sleep (it also powers the Radeon off again after resume if it was off before sleep). The VBT is built by the loader itself, on the fly: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
+| **5** | Hybrid Boot (Intel + Radeon) | Same as 4 (the VBT is built on the fly in the same way), but the Radeon is **not** switched off and stays available as a secondary adapter. The ACPI patch is a separate file: brightness plus a gmux re-route on resume (sleep), no Radeon rail code. **Available only while `gpu-power-prefs` (NVRAM) is set to the iGPU value**; otherwise it is shown as `unavailable: Switch to iGPU` and cannot be started (see **Advanced menu**). |
 | | `*************************` | separator, not selectable |
 | **6** | Advanced menu | Does not boot anything. Opens a submenu (see **Advanced menu**). |
 
-Mode 4 needs no hand-made VBT: the iGPU asks the panel what it supports.
+Modes 4 and 5 need no hand-made VBT: the loader builds it on the fly and the iGPU asks the panel what it supports.
+
+## Power consumption
+
+Approximate figures, they depend on the Windows power settings (power mode / plan).
+
+| Mode | Idle | Work |
+|------|------|------|
+| **1** AMD default (iGPU hidden) | 12 W | 26 W |
+| **4** Efficient (Intel only, AMD off) | 8.3 W | 11.6 W |
+| **5** Hybrid (iGPU + AMD secondary) | 10.1 W | 16.8 W |
 
 ## What you need to prepare
 
@@ -42,9 +52,10 @@ says which file is missing.
 
 How to get the files: see **Install** below (Claude makes them from your ACPI dumps). Background:
 
-- `SSDT_IGPU.aml` (mode 4, brightness and sleep; no VBT file is needed, the loader reads the same data from
-  the panel itself: DPCD + EDID over AUX-A): [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md).
-- `SSDT_IGPU_BRT.aml` (mode 5, brightness and resume re-route, no Radeon rail code):
+- `SSDT_IGPU.aml` (mode 4, brightness and sleep with Radeon power-off; no VBT file is needed, the loader reads
+  the same data from the panel itself: DPCD + EDID over AUX-A): [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md).
+- `SSDT_IGPU_BRT.aml` (mode 5, brightness and resume re-route, no Radeon rail code; the VBT is built on the fly
+  here too):
   [docs/ACPI_PATCH_GUIDE_MODE5.md](docs/ACPI_PATCH_GUIDE_MODE5.md).
 
 ## Install
@@ -78,7 +89,7 @@ in the zip. If it is not, take the dump on Linux (a live USB is enough): the fil
 Attach to one chat with Claude:
 
 - the ACPI tables (`dsdt.dat`, `ssdt*.dat`);
-- the **project archive** `t2-gmux-uefi-main.zip` (it contains `tools/`, `docs/ACPI_PATCH_GUIDE.md` and
+- the **project archive** of this repository (GitHub: Code > Download ZIP; it contains `tools/`, `docs/ACPI_PATCH_GUIDE.md` and
   `docs/ACPI_PATCH_GUIDE_MODE5.md`, the instructions Claude follows);
 - `docs/ACPI_PATCH_GUIDE.md` (mode 4) and `docs/ACPI_PATCH_GUIDE_MODE5.md` (mode 5) again as separate files,
   so they are certainly read.
@@ -170,8 +181,9 @@ Intel control panel: http://www.microsoft.com/store/apps/9PLFNLNT3G5G
 ## Use
 
 - **Up / Down + Enter** (or Space) starts the highlighted mode. The `*************************` separator is
-  skipped: the highlight only moves over entries. Pressing **1**, **4** or **5** starts that mode at once,
-  **6** opens the Advanced menu.
+  skipped: the highlight only moves over entries. Pressing **1**, **4** or **5** starts that mode at once
+  (**1** only while the preference is not iGPU, **5** only while it is iGPU, see **Advanced menu**), **6** opens the
+  Advanced menu.
 - If you press nothing for 5 seconds, the **default** mode starts. Any key stops the timer.
 - The default mode is marked with an **x**. Press **X** to make the highlighted mode the default (it is
   saved in `t2gmux_default.txt` on the EFI partition; delete the file to go back to mode 4). X only saves,
@@ -222,8 +234,8 @@ The write is done from the UEFI loader and has not been tested on hardware. To u
   shown on the built-in display before that (no boot logo, no loader screen after the switch).
 - **Mode 4:** after **Win + Ctrl + Shift + B** (graphics driver restart) the screen goes **black**. Do not
   use that shortcut in mode 4; restart the Mac to get the picture back.
-- **Mode 5:** the Radeon stays on, only the panel is moved to the iGPU. This mode is new and has not been
-  tested on hardware; until it has, avoid **Win + Ctrl + Shift + B** as in mode 4. Its ACPI patch re-routes
+- **Mode 5:** the Radeon stays on, only the panel is moved to the iGPU. Avoid **Win + Ctrl + Shift + B** as in
+  mode 4. Its ACPI patch re-routes
   gmux to the iGPU on resume (the firmware puts the panel back on the Radeon, see
   [docs/ACPI_PATCH_GUIDE_MODE5.md](docs/ACPI_PATCH_GUIDE_MODE5.md), section 5.2). That re-route is untested: if
   the Mac hangs or powers off on resume, restart instead of sleeping and report it.
@@ -233,13 +245,16 @@ The write is done from the UEFI loader and has not been tested on hardware. To u
 - After mode **4** switches the Radeon off, do **not** power it back on from Windows.
 - Do not use `SSDT_IGPU.aml` under the name `SSDT_IGPU_BRT.aml`: it contains the Radeon rail-off check that mode 5
   must not have.
-- If the screen is dark, restart the Mac and choose mode **1** (hold the key or press 1 at the menu) to
-  boot normally on the Radeon.
+- If the screen is dark, restart the Mac and choose mode **1** (press 1 at the menu) to boot normally on the
+  Radeon. Mode 1 is unavailable while `gpu-power-prefs` is set to the iGPU: then open the **Advanced menu**, use
+  **Switch to dGPU** (the Mac reboots) and choose mode 1 in the menu that follows.
 
 ## Undo
 
-Delete `bootx64.efi` from `/EFI/Boot/` and rename `bootx64_original.efi` back to `bootx64.efi`. The
-loader only writes one file, `t2gmux_default.txt`.
+If the preference is set to the iGPU, first use **Switch to dGPU** in the Advanced menu (or reset the NVRAM), so
+the firmware goes back to the Radeon. Then delete `bootx64.efi` from `/EFI/Boot/` and rename
+`bootx64_original.efi` back to `bootx64.efi`. Besides `gpu-power-prefs` (Advanced menu only), the loader writes
+one file, `t2gmux_default.txt`.
 
 ## More
 

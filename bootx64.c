@@ -293,7 +293,7 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 // ---- UI: plain ASCII frame on the text console ----
 //
 //  +======================================================================+
-//  |                          GMUX_Control v0.9                           |
+//  |                          GMUX_Control v0.91                          |
 //  +======================================================================+
 //  | Status: ...                                                          |
 //  +----------------------------------------------------------------------+
@@ -315,7 +315,7 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 //
 // After a mode is chosen the frame below the title is cleared and the rows PR_* are
 // used for progress output (no frame there).
-#define APP_TITLE       L"GMUX_Control v0.9"
+#define APP_TITLE       L"GMUX_Control v0.91"
 #define UI_W            72      // frame width in columns, including both border chars
 #define UI_HINT_MAIN    L"Up/Down + Enter, or the mode number. X = save selected as default (x)"
 

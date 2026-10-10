@@ -1,3 +1,8 @@
+> **Outdated (legacy).** This guide describes the old mode 3 (`SSDT_IGPU_VBT.aml`, `make_ssdt_igpu.py --vbt`)
+> and a hand-made VBT from the panel EDID. Neither exists any more: modes 4 and 5 build the VBT on the fly in the
+> loader and need no VBT file (see [../README.md](../README.md) and [TECHNICAL.md](TECHNICAL.md)). Only
+> `tools/make_vbt.py` is still kept, as the reference the host tests compare the loader's VBT patcher with.
+
 # How to make `t2gmux_vbt.bin` (VBT for mode 3; mode 4 needs no file)
 
 The T2 firmware leaves the Intel OpRegion VBT mailbox empty, so the Windows Intel driver does not know
