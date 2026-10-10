@@ -182,6 +182,29 @@ static VOID ReadBar(EFI_BOOT_SERVICES* BS, RB_DEV* d, UINTN Slot, RB_BAR* b)
     }
 }
 
+// True size of a 64-bit BAR: all ones with memory decode off, read the mask back, put the old value back.
+// GetBarAttributes() is not trusted for this: on this Mac it reported 1 MB for the 2 MB doorbell BAR (BAR2), the
+// bridge windows were then made 1 MB too short and the upper half of BAR2 sat outside them (Windows: Code 12,
+// STATUS_CONFLICTING_ADDRESSES). 0 = could not tell.
+static UINT64 ProbeBar64(RB_DEV* d, UINT32 Slot)
+{
+    UINT32 off = PCI_BAR0 + 4 * Slot;
+    UINT16 Cmd = C16(d, PCI_CMD);
+    UINT32 oLo = C32(d, off), oHi = C32(d, off + 4), lo, hi;
+    UINT64 m;
+
+    W16(d, PCI_CMD, (UINT16)(Cmd & ~PCI_CMD_MEM));
+    W32(d, off, 0xFFFFFFFFu);
+    W32(d, off + 4, 0xFFFFFFFFu);
+    lo = C32(d, off);
+    hi = C32(d, off + 4);
+    W32(d, off, oLo);
+    W32(d, off + 4, oHi);
+    W16(d, PCI_CMD, Cmd);
+    m = ((UINT64)hi << 32) | (lo & ~0xFULL);
+    return m ? (~m + 1) : 0;
+}
+
 static BOOLEAN AddUsed(_INT_Range* U, UINTN* N, UINT64 Lo, UINT64 Hi)
 {
     if (Hi < Lo)
@@ -323,6 +346,7 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32
     Out->FbMoved = 0;
     Out->Gpu = 0;
     Out->WinFb = 0;
+    Out->SizeFix = 0;
     if (D == NULL || U == NULL)
         goto out;
 
@@ -398,6 +422,14 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32
             }
             Slot[NP] = (UINT32)s;
             Sz[NP] = b.Size;
+            if (b.Is64) {                                   // trust the BAR itself, not the bus driver's number
+                UINT64 Real = ProbeBar64(G, (UINT32)s);
+
+                if (Real != 0 && Real != b.Size) {
+                    Sz[NP] = Real;
+                    Out->SizeFix++;
+                }
+            }
             OldAddr[NP] = b.Addr;
             OldLo[NP] = C32(G, PCI_BAR0 + 4 * (UINT32)s);
             OldHi[NP] = b.Is64 ? C32(G, PCI_BAR0 + 4 * (UINT32)s + 4) : 0;
