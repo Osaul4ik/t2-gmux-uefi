@@ -569,6 +569,7 @@ RebarLogSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN Setting, BOOLEAN R
         n = RbLogStr(B, n, "\nWIN_HI=0x");    n = RbLogHex(B, n, Rb->WinHi);
         n = RbLogStr(B, n, "\nGOP_MOVED=");   n = RbLogDec(B, n, Rb->FbMoved);
         n = RbLogStr(B, n, "\nGPU_BDF=");     n = RbLogDec(B, n, Rb->Gpu);   // bus<<8 | dev<<3 | fn
+        n = RbLogStr(B, n, "\nWIN_FALLBACK="); n = RbLogDec(B, n, Rb->WinFb);
     }
     B[n++] = '\n';
     _INT_WriteEspFile(BS, Image, L"\\t2gmux_rebar.txt", B, n);

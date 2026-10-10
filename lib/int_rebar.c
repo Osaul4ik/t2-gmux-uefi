@@ -27,7 +27,14 @@
 #define BR_PREF_LIMIT_U     0x2C
 
 #define EXTCAP_REBAR        0x0015
-#define REBAR_MAX_EXP       14              // 16 GB: more is never useful for the VRAM of these cards
+#define REBAR_MAX_EXP       12              // 4 GB (2^12 MB): this Mac's Radeon has 4 GB of VRAM
+
+// Fallback when the root bridge reports no MMIO window above 4 GB (Apple's EFI does not hand one out through
+// EFI_PCI_ROOT_BRIDGE_IO.Configuration()). These are the M64B / M64L values the firmware leaves in the ACPI
+// SANV region of this MacBook (read from RAM: M64B = 0x4000000000, M64L = 0x4000000000), i.e. the window
+// Windows is told about in the PCI0 _CRS.
+#define RB_FALLBACK_LO      0x4000000000ULL
+#define RB_FALLBACK_HI      0x7FFFFFFFFFULL
 #define GB4                 0x100000000ULL
 
 #define RB_MAXDEV           128
@@ -303,6 +310,7 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_R
     Out->NewBase = Out->WinLo = Out->WinHi = 0;
     Out->FbMoved = 0;
     Out->Gpu = 0;
+    Out->WinFb = 0;
     if (D == NULL || U == NULL)
         goto out;
 
@@ -463,8 +471,9 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_R
     UINT32 Below = REBAR_MAX_EXP + 1;
 
     if (!RootWindow(BS, G->Seg, Ch[NC - 1]->Bus, &WLo, &WHi)) {
-        Code = _INT_REBAR_NO_WINDOW;
-        goto out;
+        WLo = RB_FALLBACK_LO;
+        WHi = RB_FALLBACK_HI;
+        Out->WinFb = 1;
     }
     Out->WinLo = WLo;
     Out->WinHi = WHi;
