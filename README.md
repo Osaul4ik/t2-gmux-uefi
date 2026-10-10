@@ -254,6 +254,11 @@ driver's hook again right before Windows takes over (otherwise the driver crashe
 `docs/TECHNICAL.md`), so the fake is seen by bootmgr / winload only. It only changes what the firmware
 reports; it does not turn real Secure Boot on.
 
+Because the Windows boot loader sees Secure Boot as enabled, Windows ignores **Test Mode** (`testsigning`) while the
+switch is **True**, and drivers that are only test-signed do not load. Set the switch to **False** to use them.
+
+### gpu-power-prefs
+
 The loader reads `gpu-power-prefs` at start and after leaving the Advanced menu, and only the entry that
 would change something is shown:
 
@@ -278,57 +283,19 @@ The write is done from the UEFI loader and has not been tested on hardware. To u
 
 ## macOS and `gpu-power-prefs`
 
-Switching `gpu-power-prefs` to the iGPU changes the NVRAM variable that macOS also reads, so macOS may react
-**unpredictably** to it. After **Switch to iGPU** it is better to make macOS use the Intel GPU as well.
-
-Run the commands below in macOS, in Terminal (`sudo` asks for your password). `gpuswitch` takes three values:
-`0` = integrated GPU only, `1` = discrete GPU only, `2` = automatic switching (the default).
-
-### Force the iGPU
-
-| What | Command |
-|------|---------|
-| On **battery** only | `sudo pmset -b gpuswitch 0` |
-| On the **charger** only | `sudo pmset -c gpuswitch 0` |
-| **Both** at once | run both commands above, one after the other |
-
-Public sources also give `sudo pmset -a gpuswitch 0` (`-a` = battery and charger together). If it does not apply
-on your Mac, use the two separate commands.
-
-### Reset to the default (automatic switching)
-
-| What | Command |
-|------|---------|
-| On **battery** only | `sudo pmset -b gpuswitch 2` |
-| On the **charger** only | `sudo pmset -c gpuswitch 2` |
-| **Both** at once | run both commands above, or `sudo pmset -a gpuswitch 2` |
-
-### Check the current values
-
-```
-pmset -g custom
-```
-
-It lists the settings separately for battery and charger.
-
-### Full rollback
-
-1. In macOS: reset `gpuswitch` to `2` for battery and charger (see above).
-2. In the loader: **Advanced menu > Switch to dGPU** (the Mac reboots). After that **Standart Boot** (mode 1)
-   is available again.
-
-### Notes
-
-- With integrated-only forced, an external display does not work (on the 15"/16" MacBook Pro the external ports
-  are driven by the Radeon): set `gpuswitch` back to `2` first.
-- `gpuswitch` is not described in `man pmset`. The commands are taken from public sources and were not tested by
-  the author on every macOS version.
+macOS resets `gpu-power-prefs`. If you forced the iGPU with **Switch to iGPU** and then boot **macOS**, the flag is
+cleared. At the next start the loader sees the preference as dGPU again, so **Hybrid Boot** (mode 5) is shown as
+`unavailable: Switch to iGPU` and **Standart Boot** (mode 1) is available. To use Hybrid Boot again, activate
+the flag once more in the loader: **Advanced menu > Switch to iGPU** (the Mac reboots), then choose mode 5. Do
+this after every boot into macOS. Nothing has to be changed in macOS itself.
 
 ## What to expect
 
 - **Mode 4 with `gpu-power-prefs` = dGPU** (the firmware default, Radeon): after the switch to the Intel iGPU the
   picture appears **on the Windows login screen**. Nothing is shown on the built-in display before that (no boot
   logo, no loader screen after the switch).
+- **Mode 5 after macOS:** booting macOS resets `gpu-power-prefs` (see **macOS and `gpu-power-prefs`**), so mode 5
+  is unavailable until you use **Switch to iGPU** in the Advanced menu again.
 - **Mode 5:** the Radeon stays on, only the panel is moved to the iGPU. Its ACPI patch re-routes
   gmux to the iGPU on resume (the firmware puts the panel back on the Radeon, see
   [docs/ACPI_PATCH_GUIDE_MODE5.md](docs/ACPI_PATCH_GUIDE_MODE5.md), section 5.2). That re-route is untested: if
@@ -345,8 +312,7 @@ It lists the settings separately for battery and charger.
 ## Undo
 
 If the preference is set to the iGPU, first use **Switch to dGPU** in the Advanced menu (or reset the NVRAM), so
-the firmware goes back to the Radeon (and, if you ran `pmset gpuswitch 0`, roll that back too, see
-**macOS and `gpu-power-prefs`**). Then delete `bootx64.efi` from `/EFI/Boot/` and rename
+the firmware goes back to the Radeon. Then delete `bootx64.efi` from `/EFI/Boot/` and rename
 `bootx64_original.efi` back to `bootx64.efi`. Besides `gpu-power-prefs` (Advanced menu only), the loader writes
 one file, `t2gmux_default.txt`.
 
