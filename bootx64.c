@@ -553,7 +553,7 @@ FsbExitNotify(EFI_EVENT Event, VOID *Context)
 static EFI_GUID GlobalVarGuid = { 0x8BE4DF61, 0x93CA, 0x11D2, { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C } };
 
 static EFI_STATUS
-FsbStart(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, EFI_HANDLE Image, BOOLEAN *Hooked, UINTN *SbValue, BOOLEAN *Runtime)
+FsbStart(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, EFI_HANDLE Image, BOOLEAN *Hooked, UINTN *SbValue)
 {
     EFI_GUID LiGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
     EFI_LOADED_IMAGE_PROTOCOL *Li = NULL;
@@ -566,7 +566,6 @@ FsbStart(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, EFI_HANDLE Image, BOOL
 
     *Hooked = FALSE;
     *SbValue = 0xFF;
-    *Runtime = FALSE;
 
     St = BS->HandleProtocol(Image, &LiGuid, (VOID **)&Li);
     if (EFI_ERROR(St) || Li == NULL)
@@ -584,16 +583,7 @@ FsbStart(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, EFI_HANDLE Image, BOOL
         return St;
     }
     *Hooked = (RT->GetVariable != Before) ? TRUE : FALSE;
-    {
-        // A runtime driver (PE subsystem 12, FSB/ build) is loaded into EfiRuntimeServicesCode: its hook stays
-        // valid after ExitBootServices and must stay in place. Only a boot-services image (the upstream
-        // build) needs the hook taken out again.
-        EFI_LOADED_IMAGE_PROTOCOL *DLi = NULL;
-        if (!EFI_ERROR(BS->HandleProtocol(H, &LiGuid, (VOID **)&DLi)) && DLi != NULL &&
-            DLi->ImageCodeType == EfiRuntimeServicesCode)
-            *Runtime = TRUE;
-    }
-    if (*Hooked && !*Runtime) {
+    if (*Hooked) {
         EFI_EVENT Ev = NULL;
 
         gFsbRT = RT;
@@ -1609,9 +1599,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         LOG(&gs, PR_FSB, L"FakeSecureBoot: off");
     } else {
         BOOLEAN FsbHooked = FALSE;
-        BOOLEAN FsbRuntime = FALSE;
         UINTN FsbValue = 0xFF;
-        EFI_STATUS FS = FsbStart(BS, SystemTable->RuntimeServices, ImageHandle, &FsbHooked, &FsbValue, &FsbRuntime);
+        EFI_STATUS FS = FsbStart(BS, SystemTable->RuntimeServices, ImageHandle, &FsbHooked, &FsbValue);
 
         if (FS == EFI_NOT_FOUND) {
             LOG(&gs, PR_FSB, L"FakeSecureBoot: FakeSecureBoot.efi not found, skipped");
@@ -1620,7 +1609,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         } else if (!FsbHooked) {
             LOG(&gs, PR_FSB, L"FakeSecureBoot: started, but GetVariable not hooked");
         } else {
-            LOG(&gs, PR_FSB, FsbRuntime ? L"FakeSecureBoot: OK (runtime driver, SecureBoot reads %d)" : L"FakeSecureBoot: OK (SecureBoot reads %d, unhooked at exit)", FsbValue);
+            LOG(&gs, PR_FSB, L"FakeSecureBoot: OK (SecureBoot reads %d, unhooked at exit)", FsbValue);
         }
     }
 
