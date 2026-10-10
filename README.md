@@ -258,6 +258,54 @@ fails, the status line says so.
 The write is done from the UEFI loader and has not been tested on hardware. To undo it, use
 **Switch to dGPU**, or reset the NVRAM of the Mac (Cmd + Option + P + R while powering on).
 
+## macOS and `gpu-power-prefs`
+
+Switching `gpu-power-prefs` to the iGPU changes the NVRAM variable that macOS also reads, so macOS may react
+**unpredictably** to it. After **Switch to iGPU** it is better to make macOS use the Intel GPU as well.
+
+Run the commands below in macOS, in Terminal (`sudo` asks for your password). `gpuswitch` takes three values:
+`0` = integrated GPU only, `1` = discrete GPU only, `2` = automatic switching (the default).
+
+### Force the iGPU
+
+| What | Command |
+|------|---------|
+| On **battery** only | `sudo pmset -b gpuswitch 0` |
+| On the **charger** only | `sudo pmset -c gpuswitch 0` |
+| **Both** at once | run both commands above, one after the other |
+
+Public sources also give `sudo pmset -a gpuswitch 0` (`-a` = battery and charger together). If it does not apply
+on your Mac, use the two separate commands.
+
+### Reset to the default (automatic switching)
+
+| What | Command |
+|------|---------|
+| On **battery** only | `sudo pmset -b gpuswitch 2` |
+| On the **charger** only | `sudo pmset -c gpuswitch 2` |
+| **Both** at once | run both commands above, or `sudo pmset -a gpuswitch 2` |
+
+### Check the current values
+
+```
+pmset -g custom
+```
+
+It lists the settings separately for battery and charger.
+
+### Full rollback
+
+1. In macOS: reset `gpuswitch` to `2` for battery and charger (see above).
+2. In the loader: **Advanced menu > Switch to dGPU** (the Mac reboots). After that **Standart Boot** (mode 1)
+   is available again.
+
+### Notes
+
+- With integrated-only forced, an external display does not work (on the 15"/16" MacBook Pro the external ports
+  are driven by the Radeon): set `gpuswitch` back to `2` first.
+- `gpuswitch` is not described in `man pmset`. The commands are taken from public sources and were not tested by
+  the author on every macOS version.
+
 ## What to expect
 
 - **Mode 4 with `gpu-power-prefs` = dGPU** (the firmware default, Radeon): after the switch to the Intel iGPU the
@@ -279,7 +327,8 @@ The write is done from the UEFI loader and has not been tested on hardware. To u
 ## Undo
 
 If the preference is set to the iGPU, first use **Switch to dGPU** in the Advanced menu (or reset the NVRAM), so
-the firmware goes back to the Radeon. Then delete `bootx64.efi` from `/EFI/Boot/` and rename
+the firmware goes back to the Radeon (and, if you ran `pmset gpuswitch 0`, roll that back too, see
+**macOS and `gpu-power-prefs`**). Then delete `bootx64.efi` from `/EFI/Boot/` and rename
 `bootx64_original.efi` back to `bootx64.efi`. Besides `gpu-power-prefs` (Advanced menu only), the loader writes
 one file, `t2gmux_default.txt`.
 
