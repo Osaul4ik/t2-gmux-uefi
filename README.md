@@ -1,4 +1,4 @@
-# GMUX_Control v0.8
+# GMUX_Control v0.9
 
 A small UEFI loader for the **MacBook Pro 2019 with the T2 chip** (Intel iGPU + AMD Radeon). It starts
 before Windows (Boot Camp) and lets you choose which GPU Windows will use: the AMD Radeon as usual, or
@@ -21,7 +21,7 @@ picks the default after 5 seconds), the loader prepares the GPUs and then starts
 
 | Key | Mode | What it does |
 |-----|------|--------------|
-| **1** | Standart Boot (Radeon only) | Clean boot without AppleSetOs or patches. Windows starts as if the loader was not there, on the Radeon. |
+| **1** | Standart Boot (Radeon only) | Clean boot without AppleSetOs or patches. Windows starts as if the loader was not there, on the Radeon. **Available only while `gpu-power-prefs` (NVRAM) is not set to the iGPU value**; with the iGPU preference it is shown as `unavailable: Switch to dGPU` and cannot be started (see **Advanced menu**). |
 | **4** | Efficient Boot (Intel only) | Windows runs on the Intel iGPU. The built-in screen is switched to the iGPU, the Radeon is powered off, an ACPI patch fixes brightness and sleep. The VBT is built by the loader itself: it asks the panel over the iGPU's own eDP AUX channel (link rate, lanes, PSR, EDID) and injects the result. No VBT file needed. **Default.** |
 | **5** | Hybrid Boot (Intel + Radeon) | Same as 4, but the Radeon is **not** switched off. The ACPI patch is a separate file: brightness plus a gmux re-route on resume, no Radeon rail code. **Available only while `gpu-power-prefs` (NVRAM) is set to the iGPU value**; otherwise it is shown as `unavailable: Switch to iGPU` and cannot be started (see **Advanced menu**). |
 | | `*************************` | separator, not selectable |
@@ -197,17 +197,20 @@ actions:
 The loader reads `gpu-power-prefs` at start and after leaving the Advanced menu, and only the entry that
 would change something is shown:
 
-- preference = **iGPU** (variable present, first byte `01`): only **Switch to dGPU** is listed, and
-  **Hybrid Boot** (mode 5) is available;
-- preference = **dGPU** (variable absent or another value): only **Switch to iGPU** is listed, and
-  **Hybrid Boot** is shown as `unavailable: Switch to iGPU`, the highlight skips it, key **5** only shows a
-  message and the auto-boot default cannot start it;
-- variable cannot be read at all: both switch entries are listed and **Hybrid Boot** stays unavailable.
+- preference = **iGPU** (variable present, first byte `01`): only **Switch to dGPU** is listed,
+  **Hybrid Boot** (mode 5) is available, and **Standart Boot** (mode 1) is shown as
+  `unavailable: Switch to dGPU`, the highlight skips it, key **1** only shows a message and the auto-boot
+  default cannot start it;
+- preference = **dGPU** (variable absent or another value): only **Switch to iGPU** is listed,
+  **Standart Boot** is available, and **Hybrid Boot** is shown as `unavailable: Switch to iGPU`, the
+  highlight skips it, key **5** only shows a message and the auto-boot default cannot start it;
+- variable cannot be read at all: both switch entries are listed, **Standart Boot** is available and
+  **Hybrid Boot** stays unavailable.
 
 A line under the entries shows the current value. After a switch the status line shows the result (checked
 by reading the variable back). The firmware reads the variable at boot, so after a successful switch the
-loader shows the result for about a second and a half and reboots the Mac; **Hybrid Boot** is then available
-in the menu that follows. If the write fails there is **no** reboot and the menu stays. If the reset itself
+loader shows the result for about a second and a half and reboots the Mac; the menu that follows has
+**Hybrid Boot** available after Switch to iGPU, and **Standart Boot** available after Switch to dGPU. If the write fails there is **no** reboot and the menu stays. If the reset itself
 fails, the status line says so.
 
 The write is done from the UEFI loader and has not been tested on hardware. To undo it, use

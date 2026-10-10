@@ -49,12 +49,14 @@ Reboot, Power off, Back.
 - Standart Boot + Intel Secondary makes `AdvancedMenu()` return TRUE: the caller starts mode 2
   (standard boot + AppleSetOs). Back / Esc return FALSE.
 
-Mode 5 (Hybrid Boot) depends on the same variable: `GpuPrefsIsIGpu()` is true only when the variable is found
+Modes 1 and 5 depend on the same variable: `GpuPrefsIsIGpu()` is true only when the variable is found
 and its first byte is `01`. The loader reads it once at start and again after returning from the Advanced menu
-(a successful switch reboots anyway). While it is false, mode 5 is drawn as `unavailable: Switch to iGPU`,
-`MenuStep()` skips it for Up/Down, key 5 shows a status message, and `ModeAvailable()` refuses it (this also
-covers the auto-boot default; the highlight then moves to mode 4). An unreadable variable counts as not
-confirmed, so mode 5 stays unavailable.
+(a successful switch reboots anyway). `ModeGpuOff()` is the single place that ties a mode to it: mode 5
+(Hybrid Boot) is off while the value is not iGPU, mode 1 (Standart Boot) is off while it is iGPU. An
+off mode is drawn as `unavailable: Switch to iGPU` / `unavailable: Switch to dGPU`, `MenuStep()` skips it for
+Up/Down, its key (5 / 1) shows a status message, and `ModeAvailable()` refuses it (this also covers the
+auto-boot default; the highlight then moves to mode 4). An unreadable variable counts as not confirmed
+(= dGPU), so mode 5 stays unavailable and mode 1 stays available.
 
 The firmware reads the variable early at boot, so a change only applies after a restart; that is why a
 successful switch reboots at once. Nothing else is touched: no gmux access, no ACPI, no files. The Advanced
