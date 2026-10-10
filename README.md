@@ -50,7 +50,8 @@ Approximate figures, they depend on the Windows power settings (power mode / pla
 If a file is missing, that mode cannot be started: the menu stays, the timer stops and the status line
 says which file is missing.
 
-How to get the files: see **Install** below (Claude makes them from your ACPI dumps). Background:
+How to get the files: see **Install** below (make them yourself, or let Claude make them from your ACPI dumps).
+Background:
 
 - `SSDT_IGPU.aml` (mode 4, brightness and sleep with Radeon power-off; no VBT file is needed, the loader reads
   the same data from the panel itself: DPCD + EDID over AUX-A): [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md).
@@ -64,7 +65,8 @@ The loader is already built: take the ready `bootx64.efi` (from the project's re
 artifact of the GitHub Actions run). You do not need to build it.
 
 Modes **1** and **2** need nothing else, go straight to step 3 (and skip step 5). Modes **4** and **5** need patch files
-made for **your** Mac (`SSDT_IGPU*.aml`). Claude makes them from the data you collect in steps 1-2.
+made for **your** Mac (`SSDT_IGPU*.aml`). You can make them yourself or let Claude make them from the ACPI dumps
+you collect in step 1 (step 2).
 
 ### 1. Collect the ACPI tables: DSDT and all SSDT (Windows)
 
@@ -77,16 +79,48 @@ acpidump.exe -b
 ```
 
 This writes every table as a binary file: `dsdt.dat`, `ssdt1.dat`, `ssdt2.dat`, ... Take **all** of them.
-Do not disassemble or edit.
+Keep the originals untouched (if you patch yourself in 2.1, disassemble copies).
 
 The download page describes the ASL compiler / disassembler (`iasl`); check that `acpidump.exe` is really
 in the zip. If it is not, take the dump on Linux (a live USB is enough): the files are in
 `/sys/firmware/acpi/tables/` (`DSDT`, `SSDT*`, copy as root), see
 [docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md), section 4.
 
-### 2. Send everything to Claude
+### 2. Make the patch files (modes 4 and 5)
 
-Attach to one chat with Claude:
+Choose **one** way. Both start from the dumps of step 1 and give you the same result: `SSDT_IGPU.aml` (mode 4)
+and/or `SSDT_IGPU_BRT.aml` (mode 5). The files are built from your dumps and were not run on your hardware: test them in step 5.
+
+#### 2.1 Patch it yourself
+
+The repository has the full procedure and a working reference for the MacBook Pro 2019:
+[docs/ACPI_PATCH_GUIDE.md](docs/ACPI_PATCH_GUIDE.md) (mode 4) and
+[docs/ACPI_PATCH_GUIDE_MODE5.md](docs/ACPI_PATCH_GUIDE_MODE5.md) (mode 5). They are written for an AI agent, but they
+are plain step-by-step instructions you can follow by hand. The sources are `tools/SSDT_IGPU.asl` (mode 4) and
+`tools/SSDT_IGPU_BRT.asl` (mode 5). Any general guide on writing an SSDT and compiling it with `iasl` helps with
+the basics; what is different here is that the **loader** does the renames, not the AML and not a config file.
+
+1. Disassemble **copies** of your dumps with `iasl -d` (the `iasl` tool is part of ACPICA, see step 1).
+2. In the `.dsl` files confirm every path of the reference `.asl` on **your** Mac: exactly one `_BCM` in the table
+   `SaSsdt`, the Radeon device with its `ABCM` and `MBWR` methods, exactly one `_WAK` in the DSDT (mode 4 also
+   needs `GVEN`, `CSTS` and the gmux window address). Where your dump differs, change the `.asl`.
+3. Rules that must stay true:
+   - the SSDT defines the **new** `_BCM` (and `_WAK`, mode 4 also `_PTS`) and calls the renamed originals
+     `XBCM`, `XWAK`, `XPTS`; the loader renames the originals, never write the renames yourself;
+   - mode 5 must contain **no** `_PTS` / `XPTS` and no gmux window; mode 4 contains them;
+   - no `_INI` and no VBT in either file: the loader injects the VBT from UEFI;
+   - the OEM table ids differ (`IGPUBCM` / `IGPUBRT`), and the files are not interchangeable.
+4. Copy the `.asl` out of `tools/` into a working folder and compile it there (never write output into `tools/`):
+   ```
+   iasl SSDT_IGPU.asl             # gives SSDT_IGPU.aml      (mode 4)
+   iasl SSDT_IGPU_BRT.asl         # gives SSDT_IGPU_BRT.aml  (mode 5)
+   ```
+   (or, from the repository, `python tools/make_ssdt_igpu.py [--asl tools/SSDT_IGPU_BRT.asl] -o <dir>/<name>.aml`). Check the result as
+   in section 7 of the guide of your mode (0 errors, only the expected names inside the AML).
+
+#### 2.2 Send everything to Claude
+
+Let Claude do the steps of 2.1 for you. Attach to one chat with Claude:
 
 - the ACPI tables (`dsdt.dat`, `ssdt*.dat`);
 - the **project archive** of this repository (GitHub: Code > Download ZIP; it contains `tools/`, `docs/ACPI_PATCH_GUIDE.md` and
@@ -100,22 +134,18 @@ and `tools/make_ssdt_igpu.py`.
 Message to Claude (copy):
 
 ```
-Make SSDT_IGPU.aml for my MacBook Pro (T2) for mode 4.
-Follow docs/ACPI_PATCH_GUIDE.md from the project archive step by step.
+Make both ACPI patches for my MacBook Pro (T2):
+1. SSDT_IGPU.aml (mode 4, Efficient Boot): follow docs/ACPI_PATCH_GUIDE.md.
+2. SSDT_IGPU_BRT.aml (mode 5, Hybrid Boot: brightness and resume re-route, no sleep code for the Radeon rail):
+   follow docs/ACPI_PATCH_GUIDE_MODE5.md.
+Use the project archive and follow each guide step by step, one guide per file; do not mix the two files.
 Attached: DSDT and SSDT dumps (*.dat), the project archive.
-Show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
+For each file show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
 ```
 
-For **mode 5** use this message instead:
+If you need only one mode, delete the other numbered line from the message.
 
-```
-Make SSDT_IGPU_BRT.aml for my MacBook Pro (T2) for mode 5.
-Follow docs/ACPI_PATCH_GUIDE_MODE5.md from the project archive step by step.
-Attached: DSDT and SSDT dumps (*.dat), the project archive.
-Brightness and resume re-route, no sleep code for the Radeon rail. Show what you compiled and checked, and which ACPI paths you confirmed in my dumps.
-```
-
-Claude returns the files for the chosen mode. They are built from your dumps and were not run on
+Claude returns the files you asked for. They are built from your dumps and were not run on
 hardware, so test them (step 5) and report the result back to Claude if the panel stays dark.
 
 ### 3. Open the EFI partition
@@ -139,9 +169,9 @@ All files go to the **EFI partition** (ESP) of the Mac's internal disk, the one 
 2. In `EFI/Boot/` rename `bootx64.efi` to `bootx64_original.efi`.
 3. Copy the ready `bootx64.efi` to `EFI/Boot/`.
 
-### 5. Put the files made by Claude on the EFI partition
+### 5. Put the patch files on the EFI partition
 
-The files made by Claude go to the **root** of the EFI partition (`S:\` or `/Volumes/EFI/`), **not** into
+The patch files go to the **root** of the EFI partition (`S:\` or `/Volumes/EFI/`), **not** into
 `EFI/Boot/`:
 
 | Mode | Copy to the root of the EFI partition |
@@ -163,8 +193,8 @@ EFI partition
 ```
 
 Only the files of the mode you use are needed. Restart and pick the mode in the loader menu. A mode with
-missing files refuses to start and shows which file is missing. To replace a file later (a new build from
-Claude), just overwrite it.
+missing files refuses to start and shows which file is missing. To replace a file later (a new build),
+just overwrite it.
 
 Building the loader yourself is optional (needs Docker):
 
@@ -230,19 +260,16 @@ The write is done from the UEFI loader and has not been tested on hardware. To u
 
 ## What to expect
 
-- After the switch to the Intel iGPU the picture appears **on the Windows login screen**. Nothing is
-  shown on the built-in display before that (no boot logo, no loader screen after the switch).
-- **Mode 4:** after **Win + Ctrl + Shift + B** (graphics driver restart) the screen goes **black**. Do not
-  use that shortcut in mode 4; restart the Mac to get the picture back.
-- **Mode 5:** the Radeon stays on, only the panel is moved to the iGPU. Avoid **Win + Ctrl + Shift + B** as in
-  mode 4. Its ACPI patch re-routes
+- **Mode 4 with `gpu-power-prefs` = dGPU** (the firmware default, Radeon): after the switch to the Intel iGPU the
+  picture appears **on the Windows login screen**. Nothing is shown on the built-in display before that (no boot
+  logo, no loader screen after the switch).
+- **Mode 5:** the Radeon stays on, only the panel is moved to the iGPU. Its ACPI patch re-routes
   gmux to the iGPU on resume (the firmware puts the panel back on the Radeon, see
   [docs/ACPI_PATCH_GUIDE_MODE5.md](docs/ACPI_PATCH_GUIDE_MODE5.md), section 5.2). That re-route is untested: if
   the Mac hangs or powers off on resume, restart instead of sleeping and report it.
 
 ## Warnings
 
-- After mode **4** switches the Radeon off, do **not** power it back on from Windows.
 - Do not use `SSDT_IGPU.aml` under the name `SSDT_IGPU_BRT.aml`: it contains the Radeon rail-off check that mode 5
   must not have.
 - If the screen is dark, restart the Mac and choose mode **1** (press 1 at the menu) to boot normally on the
