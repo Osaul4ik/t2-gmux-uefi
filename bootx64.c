@@ -293,7 +293,7 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 // ---- UI: plain ASCII frame on the text console ----
 //
 //  +======================================================================+
-//  |                          GMUX_Control v0.91                          |
+//  |                          GMUX_Control v0.92                         |
 //  +======================================================================+
 //  | Status: ...                                                          |
 //  +----------------------------------------------------------------------+
@@ -315,7 +315,7 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 //
 // After a mode is chosen the frame below the title is cleared and the rows PR_* are
 // used for progress output (no frame there).
-#define APP_TITLE       L"GMUX_Control v0.91"
+#define APP_TITLE       L"GMUX_Control v0.92"
 #define UI_W            72      // frame width in columns, including both border chars
 #define UI_HINT_MAIN    L"Up/Down + Enter, or the mode number. X = save selected as default (x)"
 
@@ -328,7 +328,12 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 #define MENU_ROW        6       // MENU_ROWS rows: 6..(6+MENU_ROWS-1)
 #define MENU_ADV        MODE_COUNT          // menu entry 6 (Advanced menu): not a boot mode
 #define MENU_ITEMS      4                   // modes 1, 4, 5 + Advanced menu: what Up/Down walk over
-#define MENU_ROWS       7                   // rows reserved for a menu: the Advanced menu is the longest (2 + separator + 4)
+#define MENU_ROWS_BASE  7                   // rows reserved for a menu: the Advanced menu is the longest (2 + separator + 4)
+#define MENU_ROWS_FSB   9                   // same, plus the FakeSecureBoot toggle and its separator on top
+// Menu height. MENU_ROWS_FSB only when \FakeSecureBoot.efi exists on the ESP; efi_main sets it once, before the
+// frame is drawn, so without the file the screen is exactly as before. Every row macro below follows it.
+static UINTN gMenuRows = MENU_ROWS_BASE;
+#define MENU_ROWS       (gMenuRows)
 #define MENU_SEP_ROW    (MENU_ROW + 3)      // between mode 5 and the Advanced menu
 #define MENU_SEP_TEXT   L"*************************"
 #define ROW_SEP2        (MENU_ROW + MENU_ROWS)
@@ -349,7 +354,8 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 #define PR_VBT          8
 #define PR_DDI          9
 #define PR_ACPI         10
-#define PR_BOOT         11
+#define PR_FSB          11
+#define PR_BOOT         12
 
 #define COUNTDOWN_SECS  5
 #define TICKS_PER_SEC   20      // one tick = one 50 ms wait
@@ -420,17 +426,28 @@ static CHAR16 *MenuName[MODE_COUNT] = {
     L"5 - Hybrid Boot (Intel + Radeon)",
 };
 
-// Default mode (the one with the x mark, started by the auto-boot timer) is kept in a
-// one-character file in the root of the ESP (1, 4 or 5); key X in the menu rewrites it.
+// Defaults are kept in a small file in the root of the ESP; key X in the menu and the FakeSecureBoot
+// toggle in the Advanced menu rewrite it. Format (an older loader only reads the first character, so the
+// file stays compatible both ways):
+//     4            <- default mode (1, 4 or 5): the one with the x mark, started by the auto-boot timer
+//     FSB=1        <- FakeSecureBoot on (1) / off (0); no such line = off
 #define DEFAULT_FILE    L"\\t2gmux_default.txt"
 static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'4', L'5' };
 
+// FakeSecureBoot (https://github.com/Shmurkio/FakeSecureBoot): a UEFI driver that hooks
+// gRT->GetVariable and answers "SecureBoot = 1". It is started right before bootx64_original.efi.
+// The toggle exists only while this file is in the root of the ESP.
+#define FSB_FILE        L"\\FakeSecureBoot.efi"
+#define FSB_KEY         "FSB="
+
 static BOOT_MODE
-DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image)
+DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN *Fsb)
 {
     VOID *Data = NULL;
     UINTN Size = 0;
     BOOT_MODE Def = MODE_INTEL;                    // no file / unreadable: 4
+
+    *Fsb = FALSE;                                  // no file / no FSB= line: off
 
     if (!EFI_ERROR(_INT_ReadEspFile(BS, Image, DEFAULT_FILE, &Data, &Size)) && Data != NULL) {
         for (UINTN i = 0; i < Size; i++) {
@@ -445,6 +462,18 @@ DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image)
             if (m < MODE_COUNT || (ch != ' ' && ch != '\r' && ch != '\n'))
                 break;                             // first non-blank character decides
         }
+        // FSB=<0|1> anywhere after that (the mode letter is never 'F', so it cannot match there)
+        for (UINTN i = 0; i + sizeof(FSB_KEY) - 1 < Size; i++) {
+            const CHAR8 *p = (const CHAR8 *)Data + i;
+            UINTN k = 0;
+
+            while (k < sizeof(FSB_KEY) - 1 && p[k] == (CHAR8)FSB_KEY[k])
+                k++;
+            if (k == sizeof(FSB_KEY) - 1) {
+                *Fsb = (p[k] == '1') ? TRUE : FALSE;
+                break;
+            }
+        }
         _INT_FreePool(BS, Data);
     }
     if (Def == MODE_RADEON_INTEL)                  // mode 2 is not in the main menu
@@ -452,14 +481,22 @@ DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image)
     return Def;
 }
 
+// Always writes both lines, so a mode change (X) never loses the FakeSecureBoot setting and the
+// other way round.
 static EFI_STATUS
-DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode)
+DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, BOOLEAN Fsb)
 {
-    CHAR8 Buf[2];
+    CHAR8 Buf[8];
 
     Buf[0] = (CHAR8)ModeLetter[Mode];
     Buf[1] = '\n';
-    return _INT_WriteEspFile(BS, Image, DEFAULT_FILE, Buf, 2);
+    Buf[2] = FSB_KEY[0];
+    Buf[3] = FSB_KEY[1];
+    Buf[4] = FSB_KEY[2];
+    Buf[5] = FSB_KEY[3];
+    Buf[6] = Fsb ? '1' : '0';
+    Buf[7] = '\n';
+    return _INT_WriteEspFile(BS, Image, DEFAULT_FILE, Buf, 8);
 }
 
 // ---- required files per mode ----
@@ -481,6 +518,49 @@ EspFileExists(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, const CHAR16 *Name)
     if (Data != NULL)
         _INT_FreePool(BS, Data);
     return Ok;
+}
+
+// ---- FakeSecureBoot ----
+// Loads and starts \FakeSecureBoot.efi from the ESP root. It is a UEFI driver: its entry point hooks
+// gRT->GetVariable and returns EFI_SUCCESS, which keeps the image resident, so it must NOT be unloaded
+// afterwards (only on a failed start). bootx64_original.efi then asks the hooked GetVariable.
+// *Hooked = the GetVariable pointer really changed; *SbValue = what "SecureBoot" reads now (0xFF = not readable).
+static EFI_GUID GlobalVarGuid = { 0x8BE4DF61, 0x93CA, 0x11D2, { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C } };
+
+static EFI_STATUS
+FsbStart(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, EFI_HANDLE Image, BOOLEAN *Hooked, UINTN *SbValue)
+{
+    EFI_GUID LiGuid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_LOADED_IMAGE_PROTOCOL *Li = NULL;
+    EFI_DEVICE_PATH *Dp;
+    EFI_HANDLE H = NULL;
+    EFI_STATUS St;
+    EFI_GET_VARIABLE Before = RT->GetVariable;
+    UINT8 Val = 0;
+    UINTN Sz = sizeof(Val);
+
+    *Hooked = FALSE;
+    *SbValue = 0xFF;
+
+    St = BS->HandleProtocol(Image, &LiGuid, (VOID **)&Li);
+    if (EFI_ERROR(St) || Li == NULL)
+        return EFI_ERROR(St) ? St : EFI_NOT_FOUND;
+    Dp = _INT_FileDevicePath(BS, Li->DeviceHandle, FSB_FILE);
+    if (Dp == NULL)
+        return EFI_NOT_FOUND;
+    St = BS->LoadImage(FALSE, Image, Dp, NULL, 0, &H);
+    _INT_FreePool(BS, Dp);
+    if (EFI_ERROR(St))
+        return St;
+    St = BS->StartImage(H, NULL, NULL);
+    if (EFI_ERROR(St)) {
+        BS->UnloadImage(H);                         // it did not stay resident
+        return St;
+    }
+    *Hooked = (RT->GetVariable != Before) ? TRUE : FALSE;
+    if (!EFI_ERROR(RT->GetVariable(L"SecureBoot", &GlobalVarGuid, NULL, &Sz, &Val)) && Sz == sizeof(Val))
+        *SbValue = Val;
+    return EFI_SUCCESS;
 }
 
 // TRUE if the mode can start. Otherwise *Msg points to the reason (shown in the status line).
@@ -603,6 +683,10 @@ UiDrawFrame(_INT_SimpleTextGraphicsStruct *gs)
 static VOID
 MenuDraw(_INT_SimpleTextGraphicsStruct *gs, BOOT_MODE Sel, BOOT_MODE Def, BOOLEAN IGpuPref)
 {
+    // clear the whole menu area first: the Advanced menu is taller than this one and would leave its
+    // last rows (Reboot / Power off / Back) behind after Esc. Text buffer only, no refresh, no flicker.
+    for (UINTN r = 0; r < MENU_ROWS; r++)
+        UiBlank(gs, MENU_ROW + r);
     for (UINTN i = 0; i < MENU_ITEMS; i++) {
         UINTN m = MenuOrder[i];
         CHAR16 *Text = MenuText[m];
@@ -739,6 +823,9 @@ MenuStep(UINTN Sel, UINTN Step, BOOLEAN IGpuPref)
 }
 
 // ---- Advanced menu ----
+//   FakeSecureBoot: True / False      (only if \FakeSecureBoot.efi is on the ESP; Enter toggles it and
+//                                      saves it to t2gmux_default.txt at once)
+//   *************************
 //   Switch to dGPU (delete gpu-power-prefs) + reboot     (hidden while the preference is not iGPU)
 //   Switch to iGPU (set gpu-power-prefs) + reboot        (hidden while the preference is iGPU)
 //   *************************
@@ -747,7 +834,7 @@ MenuStep(UINTN Sel, UINTN Step, BOOLEAN IGpuPref)
 //   Reboot
 //   Power off
 //   Back                              (Esc does the same)
-typedef enum { ADV_TO_DGPU = 0, ADV_TO_IGPU, ADV_STD_INTEL, ADV_REBOOT, ADV_POWEROFF, ADV_BACK, ADV_COUNT } ADV_ITEM;
+typedef enum { ADV_TO_DGPU = 0, ADV_TO_IGPU, ADV_STD_INTEL, ADV_REBOOT, ADV_POWEROFF, ADV_BACK, ADV_FSB, ADV_COUNT } ADV_ITEM;
 static CHAR16 *AdvText[ADV_COUNT] = {
     L"Switch to dGPU (delete gpu-power-prefs) + reboot",
     L"Switch to iGPU (set gpu-power-prefs) + reboot",
@@ -755,7 +842,16 @@ static CHAR16 *AdvText[ADV_COUNT] = {
     L"Reboot",
     L"Power off",
     L"Back",
+    L"FakeSecureBoot",                  // drawn as "FakeSecureBoot: True/False"
 };
+
+// Row of item i. Separators: after the head (the FakeSecureBoot toggle, Head = 1; Head = 0 without it)
+// and after the switch group (items Head .. Group-1).
+static UINTN
+AdvRow(UINTN i, UINTN Head, UINTN Group)
+{
+    return MENU_ROW + i + ((Head > 0 && i >= Head) ? 1 : 0) + ((i >= Group) ? 1 : 0);
+}
 
 // Cold reset / shutdown through the runtime services. They do not return on success; if one
 // does return, the caller shows an error and stays in the menu.
@@ -769,12 +865,15 @@ ResetNow(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, EFI_RESET_TYPE Type)
 
 // Returns TRUE if "Standart Boot + Intel Secondary" was chosen (the caller starts mode 2),
 // FALSE on Back / Esc (back to the boot menu).
+// FsbAvail = \FakeSecureBoot.efi exists (the toggle is listed); *Fsb = the setting, flipped here and saved
+// together with the default mode Def.
 static BOOLEAN
 AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTERFACE *ConIn,
-             _INT_SimpleTextGraphicsStruct *gs)
+             _INT_SimpleTextGraphicsStruct *gs, EFI_HANDLE Image, BOOLEAN FsbAvail, BOOLEAN *Fsb, BOOT_MODE Def)
 {
     ADV_ITEM Items[ADV_COUNT];
     UINTN N = 0;
+    UINTN Head = 0;                     // 1 when the FakeSecureBoot toggle is listed (a separator follows it)
     UINTN Group = 0;                    // number of switch entries (the separator follows them)
     UINTN Sel = 0;
     BOOLEAN Dirty = TRUE;
@@ -789,6 +888,9 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
             GpuPrefsRead(RT, &P);
             IsIGpu = (P.Known && P.Present && P.Size >= 1 && P.Data[0] == 0x01);
             N = 0;
+            if (FsbAvail)
+                Items[N++] = ADV_FSB;
+            Head = N;
             if (!P.Known || IsIGpu)
                 Items[N++] = ADV_TO_DGPU;       // hidden while the preference is not iGPU
             if (!P.Known || !IsIGpu)
@@ -804,10 +906,17 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
             UI_PRINT(gs, ROW_MENU_HDR, L"Advanced menu:");
             for (UINTN r = 0; r < MENU_ROWS; r++)
                 UiBlank(gs, MENU_ROW + r);
-            for (UINTN i = 0; i < N; i++)
-                UI_PRINT(gs, MENU_ROW + i + ((i >= Group) ? 1 : 0), L"%s %s",
-                         (i == Sel) ? L">" : L" ", AdvText[Items[i]]);
-            UI_PRINT(gs, MENU_ROW + Group, L"   " MENU_SEP_TEXT);
+            for (UINTN i = 0; i < N; i++) {
+                if (Items[i] == ADV_FSB)
+                    UI_PRINT(gs, AdvRow(i, Head, Group), L"%s %s: %s",
+                             (i == Sel) ? L">" : L" ", AdvText[ADV_FSB], *Fsb ? L"True" : L"False");
+                else
+                    UI_PRINT(gs, AdvRow(i, Head, Group), L"%s %s",
+                             (i == Sel) ? L">" : L" ", AdvText[Items[i]]);
+            }
+            if (Head > 0)
+                UI_PRINT(gs, MENU_ROW + Head, L"   " MENU_SEP_TEXT);
+            UI_PRINT(gs, MENU_ROW + Group + ((Head > 0) ? 1 : 0), L"   " MENU_SEP_TEXT);
 
             if (!P.Known) {
                 UI_PRINT(gs, TIMER_ROW, L"gpu-power-prefs: cannot be read (%lX)", P.Status);
@@ -820,8 +929,10 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
             } else {
                 UI_PRINT(gs, TIMER_ROW, L"gpu-power-prefs: set, %d byte(s)", (UINTN)P.Size);
             }
-            UI_PRINT(gs, HINT_ROW, L"Up/Down + Enter. Esc = back. A GPU switch reboots the Mac.");
-            UiRefreshHighlight(gs, MENU_ROW + Sel + ((Sel >= Group) ? 1 : 0));
+            UI_PRINT(gs, HINT_ROW, (Items[Sel] == ADV_FSB)
+                     ? L"Enter = toggle FakeSecureBoot (saved). Esc = back."
+                     : L"Up/Down + Enter. Esc = back. A GPU switch reboots the Mac.");
+            UiRefreshHighlight(gs, AdvRow(Sel, Head, Group));
             Dirty = FALSE;
         }
 
@@ -853,6 +964,16 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
 
                 if (It == ADV_BACK) {
                     Done = TRUE;
+                } else if (It == ADV_FSB) {
+                    EFI_STATUS DS;
+
+                    *Fsb = (BOOLEAN)!*Fsb;
+                    DS = DefaultSave(BS, Image, Def, *Fsb);   // the in-memory value counts for this boot even if the save fails
+                    if (!EFI_ERROR(DS))
+                        UI_STATUS(gs, L"FakeSecureBoot: %s (saved)", *Fsb ? L"True" : L"False");
+                    else
+                        UI_STATUS(gs, L"FakeSecureBoot: %s (NOT saved: %lX)", *Fsb ? L"True" : L"False", DS);
+                    Dirty = TRUE;
                 } else if (It == ADV_STD_INTEL) {
                     Start = TRUE;
                     Done = TRUE;
@@ -1017,6 +1138,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     SIMPLE_TEXT_OUTPUT_INTERFACE* ConOut = SystemTable->ConOut;
     SIMPLE_INPUT_INTERFACE* ConIn = SystemTable->ConIn;
 
+    // FakeSecureBoot.efi on the ESP? Decides whether the Advanced menu has the toggle (and so how tall the
+    // menu area is), so it is checked before the frame is drawn.
+    BOOLEAN FsbAvail = EspFileExists(BS, ImageHandle, FSB_FILE);
+    if (FsbAvail)
+        gMenuRows = MENU_ROWS_FSB;
+
     _INT_SetGraphicsMode(BS, FALSE);
 
 
@@ -1124,7 +1251,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     // 1 / 4 / 5 = pick and confirm at once, 6 = Advanced menu,
     // X = save the highlighted mode as the default (marked x). Any key stops the auto-boot
     // timer; if no key is pressed for COUNTDOWN_SECS the default mode is started.
-    BOOT_MODE Def = DefaultLoad(BS, ImageHandle);
+    BOOLEAN Fsb = FALSE;        // FakeSecureBoot setting (t2gmux_default.txt, line FSB=); toggled in the Advanced menu
+    BOOT_MODE Def = DefaultLoad(BS, ImageHandle, &Fsb);
     BOOT_MODE Sel = Def;
     BOOLEAN IGpuPref = GpuPrefsIsIGpu(SystemTable->RuntimeServices);   // Hybrid Boot needs iGPU, Standart Boot needs dGPU
     BOOLEAN TimerOn = TRUE;
@@ -1180,7 +1308,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 if ((UINTN)Sel == MENU_ADV) {
                     UI_STATUS(&gs, L"Advanced menu cannot be the default");
                 } else {
-                    EFI_STATUS DS = DefaultSave(BS, ImageHandle, Sel);
+                    EFI_STATUS DS = DefaultSave(BS, ImageHandle, Sel, Fsb);
                     if (!EFI_ERROR(DS)) {
                         Def = Sel;
                         UI_STATUS(&gs, L"default saved: %s", MenuName[Def]);
@@ -1225,7 +1353,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             if ((UINTN)Sel == MENU_ADV) {
                 // not a boot mode: open the submenu, then come back to this menu
                 // (or start "Standart Boot + Intel Secondary" = mode 2)
-                if (AdvancedMenu(BS, SystemTable->RuntimeServices, ConIn, &gs)) {
+                if (AdvancedMenu(BS, SystemTable->RuntimeServices, ConIn, &gs, ImageHandle, FsbAvail, &Fsb, Def)) {
                     Sel = MODE_RADEON_INTEL;
                     Chosen = TRUE;
                 }
@@ -1421,6 +1549,26 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         LOG(&gs, PR_ACPI, L"ACPI patch %s: %s (%lX)",
             AcpiFile + 1,                              // file name without the leading backslash
             AS == EFI_NOT_FOUND ? L"not found, skipped" : (EFI_ERROR(AS) ? L"FAILED" : L"OK"), AS);
+    }
+
+    // ---- FakeSecureBoot (any mode, including 1): start the hook driver last, right before Windows ----
+    // A missing file or a failed start is not fatal: Windows still boots, just without the fake.
+    if (!Fsb) {
+        LOG(&gs, PR_FSB, L"FakeSecureBoot: off");
+    } else {
+        BOOLEAN FsbHooked = FALSE;
+        UINTN FsbValue = 0xFF;
+        EFI_STATUS FS = FsbStart(BS, SystemTable->RuntimeServices, ImageHandle, &FsbHooked, &FsbValue);
+
+        if (FS == EFI_NOT_FOUND) {
+            LOG(&gs, PR_FSB, L"FakeSecureBoot: FakeSecureBoot.efi not found, skipped");
+        } else if (EFI_ERROR(FS)) {
+            LOG(&gs, PR_FSB, L"FakeSecureBoot: FAILED (%lX)", FS);
+        } else if (!FsbHooked) {
+            LOG(&gs, PR_FSB, L"FakeSecureBoot: started, but GetVariable not hooked");
+        } else {
+            LOG(&gs, PR_FSB, L"FakeSecureBoot: OK (GetVariable hooked, SecureBoot reads %d)", FsbValue);
+        }
     }
 
     LOG(&gs, PR_BOOT, L"Booting bootx64_original.efi...");

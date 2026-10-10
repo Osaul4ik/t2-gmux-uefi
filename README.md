@@ -1,4 +1,4 @@
-# GMUX_Control v0.91
+# GMUX_Control v0.92
 
 A small UEFI loader for the **MacBook Pro 2019 with the T2 chip** (Intel iGPU + AMD Radeon). It starts
 before Windows (Boot Camp) and lets you choose which GPU Windows will use: the AMD Radeon as usual, or
@@ -46,6 +46,7 @@ Approximate figures, they depend on the Windows power settings (power mode / pla
 | 1, 2 | nothing |
 | 4 | `SSDT_IGPU.aml` |
 | 5 | `SSDT_IGPU_BRT.aml` |
+| any (optional) | `FakeSecureBoot.efi`: only if you want the **FakeSecureBoot** switch, see **Advanced menu** |
 
 If a file is missing, that mode cannot be started: the menu stays, the timer stops and the status line
 says which file is missing.
@@ -189,7 +190,8 @@ EFI partition
 │       └── bootx64_original.efi    <- the original Windows boot loader
 ├── SSDT_IGPU.aml                   <- mode 4
 ├── SSDT_IGPU_BRT.aml               <- mode 5
-└── t2gmux_default.txt              <- created by the loader (key X)
+├── FakeSecureBoot.efi              <- optional, adds the FakeSecureBoot switch (Advanced menu)
+└── t2gmux_default.txt              <- created by the loader (key X, FakeSecureBoot switch)
 ```
 
 Only the files of the mode you use are needed. Restart and pick the mode in the loader menu. A mode with
@@ -217,7 +219,8 @@ Intel control panel: http://www.microsoft.com/store/apps/9PLFNLNT3G5G
 - If you press nothing for 5 seconds, the **default** mode starts. Any key stops the timer.
 - The default mode is marked with an **x**. Press **X** to make the highlighted mode the default (it is
   saved in `t2gmux_default.txt` on the EFI partition; delete the file to go back to mode 4). X only saves,
-  it does not start anything. The Advanced menu cannot be the default.
+  it does not start anything. The Advanced menu cannot be the default. The same file also holds the
+  FakeSecureBoot setting (line `FSB=1` / `FSB=0`); X keeps it.
 - The bottom of the screen lists the graphics cards the loader sees.
 
 ## Advanced menu
@@ -228,6 +231,7 @@ actions:
 
 | Entry | What it does |
 |-------|--------------|
+| FakeSecureBoot: True / False | **Only listed if `FakeSecureBoot.efi` is in the root of the EFI partition.** Enter (or Space) flips it and saves it at once to `t2gmux_default.txt`. With **True** the loader starts `FakeSecureBoot.efi` right before Windows, in any boot mode (see below). A separator follows it. |
 | Switch to dGPU (delete gpu-power-prefs) | Deletes the variable, back to the firmware default (the Radeon). The Mac then **reboots by itself**. |
 | Switch to iGPU (set gpu-power-prefs) | Writes `01 00 00 00`. With that value the firmware uses the Intel iGPU at the next boot. The Mac then **reboots by itself**. |
 | `*************************` | separator, not selectable |
@@ -235,6 +239,18 @@ actions:
 | Reboot | Restarts the Mac at once (cold reset). |
 | Power off | Shuts the Mac down at once. |
 | Back | Returns to the boot menu (Esc does the same). |
+
+### FakeSecureBoot (optional)
+
+[FakeSecureBoot](https://github.com/Shmurkio/FakeSecureBoot) is a small UEFI driver that makes the firmware
+answer "Secure Boot is on" when the `SecureBoot` variable is read. Build `FakeSecureBoot.efi` from that
+project (EDK2) and put it in the root of the EFI partition; the switch then appears at the top of the
+Advanced menu. The choice is kept in `t2gmux_default.txt` (second line, `FSB=1`; an older file without that
+line means off) and applies to every boot mode, including **1**. On the progress screen it is the line
+`FakeSecureBoot: ...` just above `Booting bootx64_original.efi...`: `off`, `OK (GetVariable hooked, SecureBoot reads 1)`,
+`not found, skipped` (the setting is True but the file is gone) or `FAILED`. A failure never stops the boot,
+Windows simply starts without the fake. It only changes what the firmware reports; it does not turn real
+Secure Boot on.
 
 The loader reads `gpu-power-prefs` at start and after leaving the Advanced menu, and only the entry that
 would change something is shown:

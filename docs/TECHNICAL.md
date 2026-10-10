@@ -34,8 +34,8 @@ resume the firmware leaves the panel on the Radeon. There is no rail code, becau
 Menu entry 6 is not a boot mode. It opens `AdvancedMenu()` in `bootx64.c`, which uses the runtime
 services (`GetVariable` / `SetVariable`) on the Apple variable `gpu-power-prefs`, vendor GUID
 `fa4ce28d-b62f-4c99-9cc3-6815686e30f9`, attributes `0x07` (non-volatile + boot services + runtime, as macOS
-writes it). Entries: Switch to dGPU, Switch to iGPU, a separator, Standart Boot + Intel Secondary,
-Reboot, Power off, Back.
+writes it). Entries: [FakeSecureBoot toggle + separator, only with `\FakeSecureBoot.efi`, see below], Switch to dGPU,
+Switch to iGPU, a separator, Standart Boot + Intel Secondary, Reboot, Power off, Back.
 
 - Switch to iGPU: `SetVariable` with the 4 bytes `01 00 00 00`.
 - Switch to dGPU: `SetVariable` with size 0, which deletes the variable (an already absent variable is not
@@ -59,10 +59,36 @@ auto-boot default; the highlight then moves to mode 4). An unreadable variable c
 (= dGPU), so mode 5 stays unavailable and mode 1 stays available.
 
 The firmware reads the variable early at boot, so a change only applies after a restart; that is why a
-successful switch reboots at once. Nothing else is touched: no gmux access, no ACPI, no files. The Advanced
+successful switch reboots at once. Nothing else is touched: no gmux access, no ACPI; the only file written is `t2gmux_default.txt`, and only by the
+FakeSecureBoot switch. The Advanced
 menu is never saved as the default mode. The main menu walks over `MenuOrder[]` = modes 1, 4, 5 and the
 Advanced entry; mode 2 is not in it (a default file holding 2 falls back to mode 1; an unknown value falls
 back to mode 4).
+
+## FakeSecureBoot (optional, any mode)
+
+`FakeSecureBoot.efi` ([Shmurkio/FakeSecureBoot](https://github.com/Shmurkio/FakeSecureBoot), `UEFI_DRIVER`)
+saves `gRT->GetVariable` and replaces it with a hook that answers `SecureBoot` (global variable GUID
+`8be4df61-93ca-11d2-aa0d-00e098032b8c`) with one byte `01` and passes every other query through.
+
+- **Switch.** `AdvancedMenu()` lists `FakeSecureBoot: True/False` as the first entry (then a separator) only when
+  `EspFileExists(FSB_FILE)` is true; that check runs once in `efi_main` before the frame is drawn, because it
+  also decides the menu height (`gMenuRows` = 9 instead of 7; every row macro follows it, so without the file the
+  screen is unchanged). Enter flips `Fsb` and calls `DefaultSave()` at once; a failed save is shown in the status
+  line and the new value still counts for this boot.
+- **File format.** `t2gmux_default.txt` is `<mode letter>\nFSB=<0|1>\n`. `DefaultLoad()` takes the mode from the first
+  non-blank character as before (so an older loader still reads the file) and looks for `FSB=` separately
+  (missing = off). `DefaultSave()` always writes both lines, so X and the switch never overwrite each other.
+- **Chain.** `FsbStart()` runs after the mode's own steps (AppleSetOs, gmux, VBT, ACPI) and right before
+  `StartImage(bootx64_original.efi)`: `LoadImage` + `StartImage` of `\FakeSecureBoot.efi` with our image as parent.
+  The driver returns `EFI_SUCCESS`, which keeps it resident, so the image is unloaded only if the start failed.
+  The result is checked by comparing `gRT->GetVariable` before and after, then a `SecureBoot` read through the
+  hook (printed as `SecureBoot reads N`). Setting True with a missing file, a failed load or a failed start is
+  logged and the boot goes on. Mode 1 is the same: the switch is the one exception to "nothing is touched".
+- **Limits.** The driver is a boot-services image: its hook lives in boot-services memory, so it is meant for
+  what runs before `ExitBootServices`. The upstream hook writes the answer without checking `Data` /
+  `*DataSize`, so a caller that probes the size of `SecureBoot` with a NULL buffer would fault inside it.
+  The loader does not change the driver; this is how `FakeSecureBoot.efi` itself behaves.
 
 ## Panel data from the dGPU (EDID substitution, modes 4, 5)
 
