@@ -515,6 +515,65 @@ DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, BOOLEAN Fsb
     return _INT_WriteEspFile(BS, Image, DEFAULT_FILE, Buf, n);
 }
 
+// ---- Resizable BAR diagnostics: \t2gmux_rebar.txt on the ESP ----
+// The progress line above is on screen for a moment only, so the same result is also written to a small text
+// file (rewritten on every boot) that can be read after Windows has started.
+static UINTN
+RbLogDec(CHAR8 *B, UINTN n, UINT64 V)
+{
+    CHAR8 T[24];
+    UINTN k = 0;
+
+    do {
+        T[k++] = (CHAR8)('0' + (V % 10));
+        V /= 10;
+    } while (V != 0 && k < sizeof(T));
+    while (k > 0)
+        B[n++] = T[--k];
+    return n;
+}
+
+static UINTN
+RbLogHex(CHAR8 *B, UINTN n, UINT64 V)
+{
+    for (INTN i = 15; i >= 0; i--)
+        B[n++] = (CHAR8)"0123456789ABCDEF"[(V >> (4 * i)) & 0xF];
+    return n;
+}
+
+static UINTN
+RbLogStr(CHAR8 *B, UINTN n, const char *S)
+{
+    while (*S)
+        B[n++] = (CHAR8)*S++;
+    return n;
+}
+
+static VOID
+RebarLogSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN Setting, BOOLEAN RailOff, BOOLEAN Ran,
+             const _INT_RebarResult *Rb)
+{
+    CHAR8 B[512];
+    UINTN n = 0;
+
+    n = RbLogStr(B, n, "REBAR_SETTING=");  n = RbLogDec(B, n, Setting ? 1 : 0);
+    n = RbLogStr(B, n, "\nRAIL_OFF=");      n = RbLogDec(B, n, RailOff ? 1 : 0);
+    n = RbLogStr(B, n, "\nAPPLY_RAN=");     n = RbLogDec(B, n, Ran ? 1 : 0);
+    if (Ran) {
+        // CODE: 0 OK, 1 ALREADY, 2 NO_GPU, 3 NO_CAP, 4 NO_WINDOW, 5 NO_FIT, 6 BRIDGE, 7 OTHER, 8 VERIFY, 9 ERR
+        n = RbLogStr(B, n, "\nCODE=");        n = RbLogDec(B, n, Rb->Code);
+        n = RbLogStr(B, n, "\nOLD_BAR0_MB="); n = RbLogDec(B, n, (UINT64)1 << Rb->OldExp);
+        n = RbLogStr(B, n, "\nNEW_BAR0_MB="); n = RbLogDec(B, n, (UINT64)1 << Rb->NewExp);
+        n = RbLogStr(B, n, "\nNEW_BASE=0x");  n = RbLogHex(B, n, Rb->NewBase);
+        n = RbLogStr(B, n, "\nWIN_LO=0x");    n = RbLogHex(B, n, Rb->WinLo);
+        n = RbLogStr(B, n, "\nWIN_HI=0x");    n = RbLogHex(B, n, Rb->WinHi);
+        n = RbLogStr(B, n, "\nGOP_MOVED=");   n = RbLogDec(B, n, Rb->FbMoved);
+        n = RbLogStr(B, n, "\nGPU_BDF=");     n = RbLogDec(B, n, Rb->Gpu);   // bus<<8 | dev<<3 | fn
+    }
+    B[n++] = '\n';
+    _INT_WriteEspFile(BS, Image, L"\\t2gmux_rebar.txt", B, n);
+}
+
 // ---- required files per mode ----
 // 4 = ACPI patch without VBT + built-in VBT completed from the panel and injected from UEFI: needs \SSDT_IGPU.aml.
 // 5 = same as 4 (Radeon stays ON), but with its own SSDT (brightness + resume re-route): needs \SSDT_IGPU_BRT.aml.
@@ -1636,12 +1695,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     // undone by the next boot (switch it off in the Advanced menu). Mode 4 powers the Radeon off: nothing to do.
     if (!Rebar) {
         LOG(&gs, PR_REBAR, L"Resizable BAR: off");
+        RebarLogSave(BS, ImageHandle, Rebar, DoRailOff, FALSE, NULL);
     } else if (DoRailOff) {
         LOG(&gs, PR_REBAR, L"Resizable BAR: skipped (the Radeon rail is off in this mode)");
+        RebarLogSave(BS, ImageHandle, Rebar, DoRailOff, FALSE, NULL);
     } else {
         _INT_RebarResult Rb;
 
         _INT_RebarApply(BS, ImageHandle, &Rb);
+        RebarLogSave(BS, ImageHandle, Rebar, DoRailOff, TRUE, &Rb);
         switch (Rb.Code) {
         case _INT_REBAR_OK:
             LOG(&gs, PR_REBAR, L"Resizable BAR: OK, BAR0 %d -> %d MB at %lX (GOP moved: %d)",
