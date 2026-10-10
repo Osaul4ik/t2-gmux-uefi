@@ -293,7 +293,19 @@ static UINT32 MoveFramebuffers(EFI_BOOT_SERVICES* BS, UINT64 OldBase, UINT64 Old
     return Moved;
 }
 
-EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_RebarResult* Out)
+// Largest BAR size exponent for a wanted size in MB (floor of log2), never above REBAR_MAX_EXP. 0 = the maximum.
+static UINT32 MaxExp(UINT32 Mb)
+{
+    UINT32 e = 0;
+
+    if (Mb == 0)
+        return REBAR_MAX_EXP;
+    while (e < REBAR_MAX_EXP && ((UINT64)2 << e) <= Mb)
+        e++;
+    return e;
+}
+
+EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32 MaxMb, _INT_RebarResult* Out)
 {
     RB_DEV* D = (RB_DEV*)_INT_AllocatePool(BS, RB_MAXDEV * sizeof(RB_DEV));
     _INT_Range* U = (_INT_Range*)_INT_AllocatePool(BS, RB_MAXUSED * sizeof(_INT_Range));
@@ -468,7 +480,7 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_R
     UINT64 WLo = 0, WHi = 0, End = 0;
     UINT32 NewExp = CurExp;
     BOOLEAN Placed = FALSE, AnyLarger = FALSE;
-    UINT32 Below = REBAR_MAX_EXP + 1;
+    UINT32 Below = MaxExp(MaxMb) + 1;
 
     if (!RootWindow(BS, G->Seg, Ch[NC - 1]->Bus, &WLo, &WHi)) {
         WLo = RB_FALLBACK_LO;

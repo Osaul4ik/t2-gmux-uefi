@@ -330,8 +330,8 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 #define MENU_ADV        MODE_COUNT          // menu entry 6 (Advanced menu): not a boot mode
 #define MENU_ITEMS      4                   // modes 1, 4, 5 + Advanced menu: what Up/Down walk over
 #define MENU_ROWS_BASE  7                   // rows of the Advanced menu without the toggles (2 + separator + 4)
-#define MENU_ROWS_REBAR 9                   // plus the Resizable BAR toggle and its separator on top (always listed)
-#define MENU_ROWS_FSB   10                  // plus the FakeSecureBoot toggle as well
+#define MENU_ROWS_REBAR 10                  // plus the Resizable BAR toggle, its size row (only while On, the row is always reserved) and the separator on top
+#define MENU_ROWS_FSB   11                  // plus the FakeSecureBoot toggle as well
 // Menu height. The Advanced menu is the longest menu and always has the ReBAR toggle; MENU_ROWS_FSB only when
 // \FakeSecureBoot.efi exists on the ESP. efi_main sets it once, before the frame is drawn. Every row macro
 // below follows it.
@@ -436,6 +436,7 @@ static CHAR16 *MenuName[MODE_COUNT] = {
 //     4            <- default mode (1, 4 or 5): the one with the x mark, started by the auto-boot timer
 //     FSB=1        <- FakeSecureBoot on (1) / off (0); no such line = off
 //     REBAR=1      <- Resizable BAR on (1) / off (0); no such line = off
+//     REBARMB=4096 <- largest BAR0 size in MB (256, 512, 1024, 2048, 4096); no such line = 4096
 #define DEFAULT_FILE    L"\\t2gmux_default.txt"
 static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'4', L'5' };
 
@@ -445,6 +446,12 @@ static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'4', L'5' };
 #define FSB_FILE        L"\\FakeSecureBoot.efi"
 #define FSB_KEY         "FSB="
 #define REBAR_KEY       "REBAR="
+#define REBARMB_KEY     "REBARMB="
+
+// BAR sizes the Advanced menu offers. BAR sizes are powers of two, so the 256 MB step doubles each time.
+static const UINT32 RebarSizes[] = { 256, 512, 1024, 2048, 4096 };
+#define REBAR_SIZES     (sizeof(RebarSizes) / sizeof(RebarSizes[0]))
+static UINT32 gRebarMb = 4096;              // chosen size (REBARMB= line), used by the Resizable BAR step
 
 // TRUE if Data holds "<Key>1" (Key = "FSB=" / "REBAR=") anywhere after the mode letter.
 static BOOLEAN
@@ -470,6 +477,7 @@ DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN *Fsb, BOOLEAN *Reba
 
     *Fsb = FALSE;                                  // no file / no FSB= line: off
     *Rebar = FALSE;                                // no file / no REBAR= line: off
+    gRebarMb = 4096;                               // no file / no REBARMB= line / a size that is not in the list: 4096
 
     if (!EFI_ERROR(_INT_ReadEspFile(BS, Image, DEFAULT_FILE, &Data, &Size)) && Data != NULL) {
         for (UINTN i = 0; i < Size; i++) {
@@ -487,6 +495,26 @@ DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN *Fsb, BOOLEAN *Reba
         // FSB=<0|1> / REBAR=<0|1> anywhere after that (the mode letter is never 'F' or 'R', so it cannot match there)
         *Fsb = DefaultFlag((const CHAR8 *)Data, Size, (const CHAR8 *)FSB_KEY, sizeof(FSB_KEY) - 1);
         *Rebar = DefaultFlag((const CHAR8 *)Data, Size, (const CHAR8 *)REBAR_KEY, sizeof(REBAR_KEY) - 1);
+        {
+            const CHAR8 *D = (const CHAR8 *)Data;
+
+            for (UINTN i = 0; i + sizeof(REBARMB_KEY) - 1 < Size; i++) {
+                UINTN k = 0;
+
+                while (k < sizeof(REBARMB_KEY) - 1 && D[i + k] == REBARMB_KEY[k])
+                    k++;
+                if (k == sizeof(REBARMB_KEY) - 1) {
+                    UINT32 V = 0;
+
+                    for (UINTN j = i + k; j < Size && D[j] >= '0' && D[j] <= '9' && V < 100000; j++)
+                        V = V * 10 + (UINT32)(D[j] - '0');
+                    for (UINTN z = 0; z < REBAR_SIZES; z++)
+                        if (RebarSizes[z] == V)
+                            gRebarMb = V;
+                    break;
+                }
+            }
+        }
         _INT_FreePool(BS, Data);
     }
     if (Def == MODE_RADEON_INTEL)                  // mode 2 is not in the main menu
@@ -499,7 +527,7 @@ DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN *Fsb, BOOLEAN *Reba
 static EFI_STATUS
 DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, BOOLEAN Fsb, BOOLEAN Rebar)
 {
-    CHAR8 Buf[16];
+    CHAR8 Buf[48];
     UINTN n = 0;
 
     Buf[n++] = (CHAR8)ModeLetter[Mode];
@@ -511,6 +539,21 @@ DefaultSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOT_MODE Mode, BOOLEAN Fsb
     for (UINTN k = 0; k < sizeof(REBAR_KEY) - 1; k++)
         Buf[n++] = REBAR_KEY[k];
     Buf[n++] = Rebar ? '1' : '0';
+    Buf[n++] = '\n';
+    for (UINTN k = 0; k < sizeof(REBARMB_KEY) - 1; k++)
+        Buf[n++] = REBARMB_KEY[k];
+    {
+        CHAR8 T[8];
+        UINTN t = 0;
+        UINT32 V = gRebarMb;
+
+        do {
+            T[t++] = (CHAR8)('0' + (V % 10));
+            V /= 10;
+        } while (V != 0 && t < sizeof(T));
+        while (t > 0)
+            Buf[n++] = T[--t];
+    }
     Buf[n++] = '\n';
     return _INT_WriteEspFile(BS, Image, DEFAULT_FILE, Buf, n);
 }
@@ -559,6 +602,7 @@ RebarLogSave(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN Setting, BOOLEAN R
     n = RbLogStr(B, n, "REBAR_SETTING=");  n = RbLogDec(B, n, Setting ? 1 : 0);
     n = RbLogStr(B, n, "\nRAIL_OFF=");      n = RbLogDec(B, n, RailOff ? 1 : 0);
     n = RbLogStr(B, n, "\nAPPLY_RAN=");     n = RbLogDec(B, n, Ran ? 1 : 0);
+    n = RbLogStr(B, n, "\nREQUEST_MB=");    n = RbLogDec(B, n, gRebarMb);
     if (Ran) {
         // CODE: 0 OK, 1 ALREADY, 2 NO_GPU, 3 NO_CAP, 4 NO_WINDOW, 5 NO_FIT, 6 BRIDGE, 7 OTHER, 8 VERIFY, 9 ERR
         n = RbLogStr(B, n, "\nCODE=");        n = RbLogDec(B, n, Rb->Code);
@@ -954,7 +998,7 @@ MenuStep(UINTN Sel, UINTN Step, BOOLEAN IGpuPref)
 //   Reboot
 //   Power off
 //   Back                              (Esc does the same)
-typedef enum { ADV_TO_DGPU = 0, ADV_TO_IGPU, ADV_STD_INTEL, ADV_REBOOT, ADV_POWEROFF, ADV_BACK, ADV_FSB, ADV_REBAR, ADV_COUNT } ADV_ITEM;
+typedef enum { ADV_TO_DGPU = 0, ADV_TO_IGPU, ADV_STD_INTEL, ADV_REBOOT, ADV_POWEROFF, ADV_BACK, ADV_FSB, ADV_REBAR, ADV_REBARSZ, ADV_COUNT } ADV_ITEM;
 static CHAR16 *AdvText[ADV_COUNT] = {
     L"Switch to dGPU (delete gpu-power-prefs) + reboot",
     L"Switch to iGPU (set gpu-power-prefs) + reboot",
@@ -964,6 +1008,7 @@ static CHAR16 *AdvText[ADV_COUNT] = {
     L"Back",
     L"FakeSecureBoot",                  // drawn as "FakeSecureBoot: True/False"
     L"Resizable BAR",                   // drawn as "Resizable BAR: On/Off"
+    L"BAR0 size",                       // drawn as "  BAR0 size: 4096 MB", listed only while Resizable BAR is On
 };
 
 // Row of item i. Separators: after the head (the FakeSecureBoot / Resizable BAR toggles, Head = 1 or 2)
@@ -1013,6 +1058,8 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
             if (FsbAvail)
                 Items[N++] = ADV_FSB;
             Items[N++] = ADV_REBAR;
+            if (*Rebar)
+                Items[N++] = ADV_REBARSZ;       // size row right under the switch, only while it is On
             Head = N;
             if (!P.Known || IsIGpu)
                 Items[N++] = ADV_TO_DGPU;       // hidden while the preference is not iGPU
@@ -1036,6 +1083,9 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
                 else if (Items[i] == ADV_REBAR)
                     UI_PRINT(gs, AdvRow(i, Head, Group), L"%s %s: %s",
                              (i == Sel) ? L">" : L" ", AdvText[ADV_REBAR], *Rebar ? L"On" : L"Off");
+                else if (Items[i] == ADV_REBARSZ)
+                    UI_PRINT(gs, AdvRow(i, Head, Group), L"%s   %s: %d MB",
+                             (i == Sel) ? L">" : L" ", AdvText[ADV_REBARSZ], (UINTN)gRebarMb);
                 else
                     UI_PRINT(gs, AdvRow(i, Head, Group), L"%s %s",
                              (i == Sel) ? L">" : L" ", AdvText[Items[i]]);
@@ -1059,6 +1109,8 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
                      ? L"Enter = toggle FakeSecureBoot (saved). Esc = back."
                      : (Items[Sel] == ADV_REBAR)
                      ? L"Enter = toggle Resizable BAR (saved). Esc = back."
+                     : (Items[Sel] == ADV_REBARSZ)
+                     ? L"Left/Right or Enter = BAR0 size, x2 per step (saved). Esc = back."
                      : L"Up/Down + Enter. Esc = back. A GPU switch reboots the Mac.");
             UiRefreshHighlight(gs, AdvRow(Sel, Head, Group));
             Dirty = FALSE;
@@ -1084,6 +1136,23 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
                 Dirty = TRUE;
             } else if (Key.ScanCode == 0x02) {                  // Down
                 Sel = (Sel + 1) % N;
+                Dirty = TRUE;
+            } else if ((Key.ScanCode == 0x03 || Key.ScanCode == 0x04) && Items[Sel] == ADV_REBARSZ) {   // Right / Left
+                UINTN z = 0;
+                EFI_STATUS DS;
+
+                while (z + 1 < REBAR_SIZES && RebarSizes[z] != gRebarMb)
+                    z++;
+                if (Key.ScanCode == 0x03 && z + 1 < REBAR_SIZES)
+                    z++;
+                else if (Key.ScanCode == 0x04 && z > 0)
+                    z--;
+                gRebarMb = RebarSizes[z];
+                DS = DefaultSave(BS, Image, Def, *Fsb, *Rebar);
+                if (!EFI_ERROR(DS))
+                    UI_STATUS(gs, L"BAR0 size: %d MB (saved)", (UINTN)gRebarMb);
+                else
+                    UI_STATUS(gs, L"BAR0 size: %d MB (NOT saved: %lX)", (UINTN)gRebarMb, DS);
                 Dirty = TRUE;
             } else if (Key.ScanCode == 0x17) {                  // Esc
                 Done = TRUE;
@@ -1111,6 +1180,19 @@ AdvancedMenu(EFI_BOOT_SERVICES *BS, EFI_RUNTIME_SERVICES *RT, SIMPLE_INPUT_INTER
                         UI_STATUS(gs, L"Resizable BAR: %s (saved)", *Rebar ? L"On" : L"Off");
                     else
                         UI_STATUS(gs, L"Resizable BAR: %s (NOT saved: %lX)", *Rebar ? L"On" : L"Off", DS);
+                    Dirty = TRUE;
+                } else if (It == ADV_REBARSZ) {
+                    UINTN z = 0;
+                    EFI_STATUS DS;
+
+                    while (z + 1 < REBAR_SIZES && RebarSizes[z] != gRebarMb)
+                        z++;
+                    gRebarMb = RebarSizes[(z + 1) % REBAR_SIZES];
+                    DS = DefaultSave(BS, Image, Def, *Fsb, *Rebar);
+                    if (!EFI_ERROR(DS))
+                        UI_STATUS(gs, L"BAR0 size: %d MB (saved)", (UINTN)gRebarMb);
+                    else
+                        UI_STATUS(gs, L"BAR0 size: %d MB (NOT saved: %lX)", (UINTN)gRebarMb, DS);
                     Dirty = TRUE;
                 } else if (It == ADV_STD_INTEL) {
                     Start = TRUE;
@@ -1703,7 +1785,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     } else {
         _INT_RebarResult Rb;
 
-        _INT_RebarApply(BS, ImageHandle, &Rb);
+        _INT_RebarApply(BS, ImageHandle, gRebarMb, &Rb);
         RebarLogSave(BS, ImageHandle, Rebar, DoRailOff, TRUE, &Rb);
         switch (Rb.Code) {
         case _INT_REBAR_OK:

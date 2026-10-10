@@ -57,6 +57,7 @@ typedef struct {
 // Resize BAR0 of the Radeon to the largest size that is supported and fits, re-place its prefetchable BARs
 // and the prefetchable windows of the bridges above it, re-point the GOP framebuffer. Boot Services only.
 // Everything is verified; on any mismatch the old values are written back.
-EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_RebarResult* Out);
+// MaxMb = largest BAR0 size wanted in MB (a power of two, 256..4096); 0 = the built-in maximum.
+EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32 MaxMb, _INT_RebarResult* Out);
 
 #endif
