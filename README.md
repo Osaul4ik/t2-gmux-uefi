@@ -259,6 +259,8 @@ reports; it does not turn real Secure Boot on.
 Because the Windows boot loader sees Secure Boot as enabled, Windows ignores **Test Mode** (`testsigning`) while the
 switch is **True**, and drivers that are only test-signed do not load. Set the switch to **False** to use them.
 
+**Anti-cheat warning:** Disabling Secure Boot may prevent some anti-cheat systems from allowing the game to launch. Using FakeSecureBoot to bypass this requirement may also violate an anti-cheat's rules and potentially result in a ban. Use it at your own risk and check the specific game's anti-cheat requirements before enabling it.
+
 ### Resizable BAR
 
 The Mac firmware has no Resizable BAR setting: it leaves BAR0 of the Radeon (the VRAM window) at 256 MB, and
