@@ -291,6 +291,9 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
     return ok;
 }
 
+#include "include/panel_cache.h"
+#include "include/hybrid_diag.h"
+
 // ---- UI: plain ASCII frame on the text console ----
 //
 //  +======================================================================+
@@ -1419,6 +1422,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     BOOLEAN Chosen = FALSE;
     BOOLEAN Want = FALSE;       // a start was requested; Chosen only if the mode's files exist
     BOOLEAN Dirty = TRUE;
+    BOOLEAN TraceHybrid = FALSE;
     UINT32 Tick = 0;
     UINT32 LastSec = 0xFFFFFFFF;
 
@@ -1477,6 +1481,17 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                     }
                 }
                 TimerOn = FALSE;
+            } else if (c == L't' || c == L'T') {
+                // One-shot shortcut: immediately boot Hybrid with diagnostics.
+                // No persistent toggle; normal [5] and timed boot are silent.
+                TimerOn = FALSE;
+                if (IGpuPref) {
+                    Sel = MODE_INTEL_DGPU_ON;
+                    TraceHybrid = TRUE;
+                    Want = TRUE;
+                } else {
+                    UI_STATUS(&gs, L"T: Hybrid unavailable, switch to iGPU first");
+                }
             } else if (c == L'1') {
                 if (!IGpuPref) {
                     Sel = MODE_RADEON; Want = TRUE;
@@ -1557,6 +1572,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     ClearRowsFrom(&gs, ROW_STATUS);
     LOG(&gs, PR_MODE, L"Mode: %s", MenuName[Sel]);
 
+    if (TraceHybrid && Sel == MODE_INTEL_DGPU_ON) {
+        HybridDiagBegin(BS, ImageHandle);
+        HybridDiagAppend("[Before AppleSetOs]\r\n");
+        HybridDiagValue("iGPU NVRAM preference=", IGpuPref, 1);
+        HybridDiagValue("ReBAR enabled=", Rebar, 1);
+        HybridDiagValue("FSB enabled=", Fsb, 1);
+    }
     // load apple_set_os - only for modes 2 / 4 / 5; mode 1 = plain Windows boot
     if (!DoSetOs) {
         LOG(&gs, PR_SETOS, L"AppleSetOs: not loaded");
@@ -1616,6 +1638,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
         LOG(&gs, PR_MUX, L"Gmux: panel -> iGPU...");
         BOOLEAN MuxOk = GmuxSwitchToIGD(BS);
+        if (HybridDiagActive) {
+            HybridDiagAppend("[GMUX switch]\r\n");
+            HybridDiagValue("panel to iGPU success=", MuxOk, 1);
+        }
         if (MuxOk) {
             LOG(&gs, PR_MUX, L"Gmux: route OK, readback=iGPU");
         } else {
@@ -1665,22 +1691,59 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             _INT_RepInit(&IR, RBuf, RCap);
             // The iGPU trains the link itself, so ask the panel what it can do: DPCD
             // (rate / lanes / PSR) and EDID over the iGPU's own AUX-A channel.
-            _INT_EdpProbe(BS, ImageHandle, &Caps, &IR);
-
+            EFI_STATUS ProbeSt = _INT_EdpProbe(BS, ImageHandle, &Caps, &IR);
+            if (HybridDiagActive) {
+                HybridDiagStatus("eDP probe=", ProbeSt);
+                HybridDiagValue("DPCD valid=", Caps.Valid, 1);
+                HybridDiagValue("AUX EDID=", Caps.HasEdid, 1);
+                HybridDiagValue("max lanes=", Caps.MaxLanes, 2);
+                HybridDiagValue("VBT lanes code=", Caps.VbtLanes, 2);
+            }
+            // Firmware EDID is normally exposed by AMD GOP; AUX EDID is preferred
+            // only when the firmware does not publish the internal APP panel.
+            UINT8 PanelEdid[128];
+            BOOLEAN LiveEdid = FALSE, UsedCachedEdid = FALSE, UsedCachedDpcd = FALSE;
+            EFI_STATUS FirmwareEdidSt = _INT_GetFirmwarePanelEdid(BS, ImageHandle, PanelEdid);
+            if (!EFI_ERROR(FirmwareEdidSt) && PanelEdidOk(PanelEdid))
+                LiveEdid = TRUE;
+            else if (Caps.HasEdid && PanelEdidOk(Caps.Edid)) {
+                for (UINTN n=0;n<128;n++) PanelEdid[n]=Caps.Edid[n];
+                LiveEdid = TRUE;
+            }
+            // Accept cache link data only if panel EDID agrees with any live EDID.
+            UINT8 CachedEdid[128], CacheRate=0, CacheLanes=0;
+            EFI_STATUS CacheSt = PanelCacheLoad(BS,ImageHandle,CachedEdid,&CacheRate,&CacheLanes);
+            if (!EFI_ERROR(CacheSt)) {
+                BOOLEAN Same = TRUE;
+                if (LiveEdid)for(UINTN n=0;n<128;n++)if(PanelEdid[n]!=CachedEdid[n]){Same=FALSE;break;}
+                if (Same) {
+                    if (!LiveEdid) {
+                        for(UINTN n=0;n<128;n++)PanelEdid[n]=CachedEdid[n];
+                        UsedCachedEdid=TRUE;
+                    }
+                    if (!Caps.Valid) {
+                        Caps.Valid=TRUE; Caps.VbtRate=CacheRate; Caps.VbtLanes=CacheLanes;
+                        Caps.MaxLanes=(UINT8)(CacheLanes==3?4:CacheLanes==1?2:1);
+                        UsedCachedDpcd=TRUE;
+                    }
+                }
+            }
+            if (Caps.Valid && LiveEdid)
+                PanelCacheSaveOnce(BS,ImageHandle,PanelEdid,&Caps);
+            _INT_RepStr(&IR,"Panel cache: ");
+            _INT_RepStr(&IR, UsedCachedEdid?"EDID cached ":LiveEdid?"EDID live ":"EDID missing ");
+            _INT_RepStr(&IR, UsedCachedDpcd?"DPCD cached":"DPCD live/missing");
+            _INT_RepNl(&IR);
             IS = _INT_InjectVbtBuiltin(BS, ImageHandle, &IR);
             if (!EFI_ERROR(IS))
                 DS = _INT_VbtApplyDpcd(BS, ImageHandle, &Caps, &IR);
-            // Apple's EFI only has panel data for the dGPU: put its EDID timing into the iGPU VBT;
-            // if it has none, take the EDID the panel itself returned over AUX.
+            // Use validated internal-panel EDID: firmware, AUX, or saved ESP cache.
             if (!EFI_ERROR(IS)) {
-                ES = _INT_VbtApplyFirmwareEdid(BS, ImageHandle, &IR);
-                if (EFI_ERROR(ES) && Caps.HasEdid) {
-                    ES = _INT_VbtApplyEdidBuf(BS, ImageHandle, Caps.Edid, 128,
-                                              "panel EDID over AUX", &IR);
-                    EdidFromAux = !EFI_ERROR(ES);
+                if (LiveEdid || UsedCachedEdid) {
+                    ES = _INT_VbtApplyEdidBuf(BS, ImageHandle, PanelEdid, 128,
+                           UsedCachedEdid ? "ESP panel cache" : "live internal panel", &IR);
+                    EdidFromAux = LiveEdid && EFI_ERROR(FirmwareEdidSt);
                 }
-                // The built-in VBT only has a placeholder timing: without a real EDID the
-                // driver would get a wrong panel, so leave the mailbox empty as before.
                 if (EFI_ERROR(ES)) {
                     _INT_VbtClearMailbox(BS, ImageHandle, &IR);
                     IS = EFI_NOT_READY;
@@ -1696,7 +1759,20 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             // ACPI patch (brightness via gmux) from the ESP root: mode 4 = SSDT_IGPU.aml,
             // mode 5 = SSDT_IGPU_BRT.aml (brightness + resume re-route).
             AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, AcpiFile, &IR);
+            if (HybridDiagActive) {
+                HybridDiagValue("EDID cache used=", UsedCachedEdid, 1);
+                HybridDiagValue("DPCD cache used=", UsedCachedDpcd, 1);
+                HybridDiagStatus("cache load=", CacheSt);
+                HybridDiagReport(&IR);
+            }
             _INT_FreePool(BS, RBuf);
+        }
+        if (HybridDiagActive) {
+            HybridDiagStatus("VBT inject=", IS);
+            HybridDiagStatus("DPCD apply=", DS);
+            HybridDiagStatus("EDID apply=", ES);
+            HybridDiagStatus("DDI A setup=", LS);
+            HybridDiagStatus("ACPI patch=", AS);
         }
         LOG(&gs, PR_VBT, L"VBT %s (%lX): link %s, EDID %s",
             EFI_ERROR(IS) ? L"FAILED" : L"OK", IS,
@@ -1783,6 +1859,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         }
     }
 
+    if (HybridDiagActive) {
+        HybridDiagAppend("[Pre-Windows]\r\n");
+        EFI_STATUS LogStatus = HybridDiagFlush();
+        LOG(&gs, PR_BOOT, L"Hybrid diagnostic ESP write: %s (%lX)",
+            EFI_ERROR(LogStatus) ? L"FAILED" : L"OK", LogStatus);
+    }
     LOG(&gs, PR_BOOT, L"Booting bootx64_original.efi...");
 
     // short delay

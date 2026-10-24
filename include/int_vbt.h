@@ -32,6 +32,8 @@ EFI_STATUS _INT_ReadEspFile(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 
 // Substitute the panel timing of the injected VBT (OpRegion+0x400) with the internal-panel
 // EDID the firmware publishes on the dGPU GOP handle (EDID active/discovered protocol).
+EFI_STATUS _INT_GetFirmwarePanelEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                      UINT8 Edid[128]);
 EFI_STATUS _INT_VbtApplyFirmwareEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                                      _INT_Rep* R);
 

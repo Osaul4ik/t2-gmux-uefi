@@ -372,6 +372,17 @@ static const UINT8* FindFirmwareEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHand
     return NULL;
 }
 
+// Obtain only Apple internal-panel EDID, never an external monitor's EDID.
+EFI_STATUS _INT_GetFirmwarePanelEdid(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                      UINT8 Edid[128])
+{
+    UINTN size=0; const char* source=NULL;
+    const UINT8* ptr=FindFirmwareEdid(BS,ImageHandle,&size,&source);
+    if(!ptr || size<128)return EFI_NOT_FOUND;
+    for(UINTN i=0;i<128;i++)Edid[i]=ptr[i];
+    return EFI_SUCCESS;
+}
+
 static EFI_STATUS ApplyEdidToVbt(UINT8* v, const UINT8* edid, UINTN EdidSize,
                                  const char* Src, _INT_Rep* R);
 
