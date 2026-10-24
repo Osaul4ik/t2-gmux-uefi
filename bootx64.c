@@ -1685,8 +1685,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             PanelStateSt = _INT_EdpPanelPowerState(BS,ImageHandle,
                  &PanelWasPowered,&PanelStatusBefore,&PanelControlBefore,&pr);
             if (HybridDiagActive) {
-                HybridDiagAppend("[Panel initial power]
-");
+                HybridDiagAppend("[Panel initial power]\r\n");
                 HybridDiagStatus("power read=",PanelStateSt);
                 if(!EFI_ERROR(PanelStateSt)) {
                     HybridDiagValue("PP_STATUS=",PanelStatusBefore,8);
