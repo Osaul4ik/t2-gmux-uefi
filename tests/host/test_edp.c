@@ -16,6 +16,9 @@ static UINT32 regs[0x100000/4];
 static UINT8 dpcd[0x800], edid[128];
 static int i2c_off, fail_first = 0, aux_calls = 0, pp_forced = 0, pp_final_vdd = -1;
 static int panel_dead = 0;
+// Panel power sequencer model (PP_STATUS 0xC7200 / PP_CONTROL 0xC7204)
+static int pps_sim = 0, pps_stuck = 0, pps_left = 0, pps_cycle_left = 0, pp_writes = 0;
+static UINT32 pp_last = 0;
 
 static EFI_STATUS Stall(UINTN us){(void)us;return 0;}
 static EFI_STATUS PciRead(EFI_PCI_IO_PROTOCOL*p,int w,UINT32 off,UINTN c,void*b){(void)p;(void)w;(void)c;
@@ -39,14 +42,22 @@ static void aux_run(void){
   for(int i=0;i<rn;i++){ UINT32*r=&regs[(0x64014+4*(i/4))/4]; if(i%4==0)*r=0; *r|=(UINT32)rx[i]<<(24-8*(i%4)); }
   regs[0x64010/4]=(ctl&~(1u<<31)&~(0x1fu<<20))|(1u<<30)|((UINT32)rn<<20);
 }
-static EFI_STATUS MemRead(EFI_PCI_IO_PROTOCOL*p,int w,UINT8 bar,UINT64 off,UINTN c,void*b){(void)p;(void)w;(void)bar;(void)c;*(UINT32*)b=regs[off/4];return 0;}
+static EFI_STATUS MemRead(EFI_PCI_IO_PROTOCOL*p,int w,UINT8 bar,UINT64 off,UINTN c,void*b){(void)p;(void)w;(void)bar;(void)c;
+  if(pps_sim && off==0xC7200){
+    if(pps_cycle_left>0){ pps_cycle_left--; *(UINT32*)b=1u<<27; return 0; }      // T12 still counting
+    if(pps_left>0){ pps_left--; if(pps_left==0) regs[off/4]=0x80000008u; }       // sequence ends -> ON_IDLE
+  }
+  *(UINT32*)b=regs[off/4];return 0;}
 static EFI_STATUS MemWrite(EFI_PCI_IO_PROTOCOL*p,int w,UINT8 bar,UINT64 off,UINTN c,void*b){(void)p;(void)w;(void)bar;(void)c;
   UINT32 v=*(UINT32*)b;
   if(off==0x64010){ // status bits are write-1-to-clear, SEND_BUSY starts a transfer
     if(v&(1u<<31)){ regs[off/4]=v; aux_run(); return 0; }
     regs[off/4]&=~(v&((1u<<30)|(1u<<28)|(1u<<25))); return 0; }
   if(off==0x45404){ UINT32 st=0; if(v&(1u<<29))st|=1u<<28; if(v&(1u<<3))st|=1u<<2; regs[off/4]=v|st; return 0; }
-  if(off==0xC7204){ pp_forced += !!(v&8) ; pp_final_vdd=!!(v&8); if((v>>16)!=0xABCD){puts("PP write without unlock key");exit(9);} regs[off/4]=v&0xFFFF; return 0; }
+  if(off==0xC7204){ pp_forced += !!(v&8) ; pp_final_vdd=!!(v&8); if((v>>16)!=0xABCD){puts("PP write without unlock key");exit(9);} regs[off/4]=v&0xFFFF;
+    pp_writes++; pp_last=v&0xFFFF;
+    if(pps_sim && (v&1) && !(regs[0xC7200/4]&(1u<<31)) && !pps_stuck){ regs[0xC7200/4]=0x9000000Au; pps_left=5; }  // power-up sequence running
+    return 0; }
   regs[off/4]=v; return 0; }
 
 static EFI_PCI_IO_PROTOCOL pci={{PciRead},{MemRead,MemWrite},Attr};
@@ -92,6 +103,31 @@ int main(void){
   panel_setup(0x14,4,3,1); panel_dead=0; for(size_t i=0;i<sizeof regs/4;i++) regs[i]=0xFFFFFFFF;
   CHECK(_INT_EdpProbe(&bs,NULL,&c,(_INT_Rep*)1)!=0 && aux_calls==0);
   puts("case 5 (all ones) OK");
+  // 6) panel OFF, Apple EFI left FORCE_VDD set (PP_CONTROL 0x68): power up, wait for the whole
+  //    sequence, then drop FORCE_VDD, never enable the backlight
+  panel_setup(0x14,4,3,1); pps_sim=1; pps_stuck=0; pps_left=0; pps_cycle_left=0; pp_writes=0; pp_last=0;
+  regs[0xC7200/4]=0; regs[0xC7204/4]=0x68;
+  CHECK(_INT_EdpPanelPrepare(&bs,NULL,(_INT_Rep*)1)==0);
+  CHECK(regs[0xC7200/4]==0x80000008u);                 // finished: ON, no sequence, ON_IDLE
+  CHECK(pps_left==0);                                  // it really waited for the sequence end
+  CHECK((pp_last&1) && (pp_last&2));                   // power on + reset
+  CHECK(!(pp_last&8));                                 // FORCE_VDD released
+  CHECK(!(pp_last&4));                                 // backlight untouched
+  CHECK(pp_writes==2);                                 // on request + VDD release, nothing else
+  puts("case 6 (panel on, VDD released) OK");
+  // 7) panel already ON (firmware lit it): no PP_CONTROL write at all
+  panel_setup(0x14,4,3,1); pp_writes=0; regs[0xC7200/4]=0x80000008u; regs[0xC7204/4]=0x67;
+  CHECK(_INT_EdpPanelPrepare(&bs,NULL,(_INT_Rep*)1)==0 && pp_writes==0);
+  puts("case 7 (already on, untouched) OK");
+  // 8) T12 power cycle delay still active at entry: wait for it, then power up
+  panel_setup(0x14,4,3,1); pps_left=0; pp_writes=0; pps_cycle_left=50; regs[0xC7200/4]=0; regs[0xC7204/4]=0x60;
+  CHECK(_INT_EdpPanelPrepare(&bs,NULL,(_INT_Rep*)1)==0 && pps_cycle_left==0 && regs[0xC7200/4]==0x80000008u);
+  CHECK(pp_writes==1 && !(pp_last&8));                 // no VDD override to release -> only the on request
+  puts("case 8 (T12 wait) OK");
+  // 9) sequencer never reports ON: bounded, reports a timeout, backlight still untouched
+  panel_setup(0x14,4,3,1); pps_stuck=1; pps_left=0; pps_cycle_left=0; pp_writes=0; regs[0xC7200/4]=0; regs[0xC7204/4]=0x68;
+  CHECK(_INT_EdpPanelPrepare(&bs,NULL,(_INT_Rep*)1)==EFI_TIMEOUT && !(pp_last&4));
+  puts("case 9 (stuck panel) OK");
   puts("ALL OK");
   return 0;
 }

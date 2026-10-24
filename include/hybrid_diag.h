@@ -139,28 +139,49 @@ static void GmuxDeepPci(EFI_BOOT_SERVICES *bs,EFI_HANDLE image) {
 
         // Do not touch MMIO unless PCI memory decode is already enabled.
         if(!(cfg[4]&2)) { GmuxDeepStr("Intel MMIO skipped: MEM decode disabled\r\n");continue; }
+        // Gen 9 / 9.5 (SKL..CFL) offsets, exactly as in i915 (i915_reg.h / intel_display_*.h).
+        // The first revision of this table used wrong offsets for TRANS_CONF_A, PIPE_A_SRC (it was
+        // PIPE_DSL_A, a live scanline counter), PP_DIVISOR, DDI_BUF_CTL_B/C/D (they were DP_TP_CTL_A
+        // and neighbours) and DPLL_CTRL1/2/STATUS; the logs of that revision must not be read with
+        // the new names.
         static const UINT32 offsets[]={
-            0x45404, // PWR_WELL_CTL2
-            0xC7200,0xC7204,0xC7208,0xC720C, // PPS status/control/on/off delays
-            0x64000,0x64010, // DDI A buffer and AUX
+            0x45400, // PWR_WELL_CTL1 (BIOS request/state)
+            0x45404, // PWR_WELL_CTL2 (driver request/state)
+            0x45504, // DC_STATE_EN
+            0x45008, // DBUF_CTL
+            0xC7200,0xC7204,0xC7208,0xC720C,0xC7210, // PP_STATUS/CONTROL/ON_DELAYS/OFF_DELAYS/DIVISOR
+            0x64000, // DDI_BUF_CTL_A
+            0x64040, // DP_TP_CTL_A (0x80040340 = link trained, normal pattern)
+            0x64044, // DP_TP_STATUS_A
+            0x64010, // DP_AUX_CH_CTL_A
+            0x64100, // DDI_BUF_CTL_B
+            0x64200, // DDI_BUF_CTL_C
+            0x64300, // DDI_BUF_CTL_D
             0x46000, // CDCLK_CTL
-            0x70008, // PIPECONF A
-            0x60000, // TRANS_CONF A / platform dependent
-            0xC4000, // BLC PWM_CTL1 (platform dependent)
-            0xC72010, // PP_DIVISOR
-            0x64040, // DDI_BUF_CTL_B
-            0x64080, // DDI_BUF_CTL_C
-            0x64100, // DDI_BUF_CTL_D
-            0x6C000, // DPLL_CTRL1 (gen9)
-            0x6C004, // DPLL_CTRL2 (gen9)
-            0x6C040, // DPLL_STATUS (gen9)
-            0x70000  // PIPE A source (platform-specific)
+            0x46010, // LCPLL1_CTL
+            0x6C058, // DPLL_CTRL1
+            0x6C05C, // DPLL_CTRL2
+            0x6C060, // DPLL_STATUS
+            0xC8250, // BLC_PWM_PCH_CTL1 (PCH backlight PWM, bit 31 = enable)
+            0xC8254, // BLC_PWM_PCH_CTL2
+            0x60000, // HTOTAL_A
+            0x6001C, // PIPESRC_A
+            0x70000, // PIPE_DSL_A (live scanline counter: changing value = pipe A is running)
+            0x70008, // PIPECONF_A
+            0x7F008, // PIPECONF_EDP (eDP transcoder)
+            0x6F400, // TRANS_DDI_FUNC_CTL_EDP
+            0x70180, // PLANE_CTL_1_A
+            0x7019C  // PLANE_SURF_1_A
         };
         static const char *names[]={
-            "PWR_WELL_CTL2=","PP_STATUS=","PP_CONTROL=","PP_ON_DELAYS=","PP_OFF_DELAYS=",
-            "DDI_BUF_CTL_A=","AUX_CTL_A=","CDCLK_CTL=","PIPECONF_A=","TRANS_CONF_A=","BLC_PWM_CTL1=",
-            "PP_DIVISOR=","DDI_BUF_CTL_B=","DDI_BUF_CTL_C=","DDI_BUF_CTL_D=",
-            "DPLL_CTRL1=","DPLL_CTRL2=","DPLL_STATUS=","PIPE_A_SRC="
+            "PWR_WELL_CTL1=","PWR_WELL_CTL2=","DC_STATE_EN=","DBUF_CTL=",
+            "PP_STATUS=","PP_CONTROL=","PP_ON_DELAYS=","PP_OFF_DELAYS=","PP_DIVISOR=",
+            "DDI_BUF_CTL_A=","DP_TP_CTL_A=","DP_TP_STATUS_A=","AUX_CTL_A=",
+            "DDI_BUF_CTL_B=","DDI_BUF_CTL_C=","DDI_BUF_CTL_D=",
+            "CDCLK_CTL=","LCPLL1_CTL=","DPLL_CTRL1=","DPLL_CTRL2=","DPLL_STATUS=",
+            "BLC_PWM_PCH_CTL1=","BLC_PWM_PCH_CTL2=",
+            "HTOTAL_A=","PIPESRC_A=","PIPE_DSL_A=","PIPECONF_A=","PIPECONF_EDP=",
+            "TRANS_DDI_FUNC_CTL_EDP=","PLANE_CTL_1_A=","PLANE_SURF_1_A="
         };
         for(UINTN j=0;j<sizeof(offsets)/sizeof(offsets[0]);j++) {
             UINT32 v=0xFFFFFFFFu;

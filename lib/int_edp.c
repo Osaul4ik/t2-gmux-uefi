@@ -277,6 +277,11 @@ EFI_STATUS _INT_EdpProbe(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 #define PP_POWER_ON (1u << 0)
 #define PP_RESET (1u << 1)
 #define PP_ON_STATUS (1u << 31)
+#define PP_SEQUENCE_MASK (3u << 28)            // 0 = none, 1 = power up, 2 = power down
+#define PP_CYCLE_DELAY_ACTIVE (1u << 27)       // T12 power cycle delay still counting
+#define PP_STATE_MASK 0xFu                     // PP_SEQUENCE_STATE
+#define PP_STATE_OFF_IDLE 0x0u
+#define PP_STATE_ON_IDLE 0x8u
 
 static EFI_STATUS PpsIgpu(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image,
                           EFI_PCI_IO_PROTOCOL **Out, _INT_Rep *R)
@@ -336,22 +341,66 @@ EFI_STATUS _INT_EdpPanelPrepare(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,_INT_Rep 
         BS->Stall(100);
     }
     if(!wells){S("PPS: power wells failed");NL();return EFI_TIMEOUT;}
+
+    // i915 wait_panel_power_cycle(): never start a power-up while the previous
+    // power-down is still running or the T12 power-cycle delay is still counting.
+    {
+        BOOLEAN idle=FALSE;
+        for(UINTN i=0;i<15000;i++) {                       // <= 1.5 s bounded wait
+            ps=Rd(&d,PP_STATUS);
+            if(!(ps & PP_ON_STATUS) && !(ps & PP_CYCLE_DELAY_ACTIVE) &&
+               (ps & PP_SEQUENCE_MASK)==0 && (ps & PP_STATE_MASK)==PP_STATE_OFF_IDLE)
+                {idle=TRUE;break;}
+            BS->Stall(100);
+        }
+        // Like i915 (which only logs an error here) go on: refusing would leave the panel dark.
+        if(!idle){S("PPS: WARNING power cycle delay did not finish, status=0x");HX(ps,8);NL();}
+    }
+
     // Intel i915 panel-on step. Do not enable EDP_BLC_ENABLE until the
     // operating system has completed link training / modeset.
-    // Preserve firmware FORCE_VDD; firmware may have deliberately enabled AUX.
+    // FORCE_VDD is preserved while the power-up sequence runs (the sequencer needs the
+    // panel supply anyway) and dropped again afterwards, see below.
     UINT32 next=(pc & 0x0000FFFFu) | PP_POWER_ON | PP_RESET;
     next=(next & ~((UINT32)EDP_BLC_ENABLE)) | PP_UNLOCK;
     Wr(&d,PP_CONTROL,next);
     UINT32 posted=Rd(&d,PP_CONTROL);
     S("PPS: control after panel-on request=0x");HX(posted,8);NL();
-    for(UINTN i=0;i<3000;i++) { // <= 300 ms bounded wait
+
+    // i915 wait_panel_on(): PP_ON alone only says the sequence STARTED (the log of a real
+    // run shows status 0x9000000A = PP_ON + sequence "power up" + state S1). Wait until it
+    // is finished (PP_ON, no sequence running, state ON_IDLE), so that the driver that is
+    // loaded next does not take over a panel that is still in the middle of T1/T2.
+    BOOLEAN done=FALSE;
+    for(UINTN i=0;i<20000;i++) {                           // <= 2 s bounded wait (i915: 5 s)
         ps=Rd(&d,PP_STATUS);
-        if(ps & PP_ON_STATUS) {
-            S("PPS: panel power ON confirmed, status=0x");HX(ps,8);NL();
-            return EFI_SUCCESS;
+        if((ps & (PP_ON_STATUS|PP_SEQUENCE_MASK|PP_STATE_MASK))==(PP_ON_STATUS|PP_STATE_ON_IDLE)) {
+            done=TRUE;
+            break;
         }
         BS->Stall(100);
     }
-    S("PPS: panel power ON TIMEOUT, status=0x");HX(ps,8);NL();
-    return EFI_TIMEOUT;
+    if(!done) {
+        S("PPS: panel power ON TIMEOUT, status=0x");HX(ps,8);NL();
+        return EFI_TIMEOUT;
+    }
+    S("PPS: panel power ON confirmed, status=0x");HX(ps,8);NL();
+
+    // The firmware of a boot that lights the panel from the iGPU leaves PP_CONTROL
+    // without FORCE_VDD (dump: 0x67 = on + reset + backlight). The power-up above was
+    // started with the VDD override that Apple EFI left set (0x68), and nothing
+    // else would ever clear it: the next driver would find an override it did not
+    // set. The panel is on, so VDD stays supplied by the sequencer itself.
+    pc=Rd(&d,PP_CONTROL);
+    if(pc & PP_FORCE_VDD) {
+        Wr(&d,PP_CONTROL,((pc & 0x0000FFFFu) & ~((UINT32)PP_FORCE_VDD)) | PP_UNLOCK);
+        pc=Rd(&d,PP_CONTROL);
+        ps=Rd(&d,PP_STATUS);
+        S("PPS: VDD override released, control=0x");HX(pc,8);S(" status=0x");HX(ps,8);NL();
+        if(!(ps & PP_ON_STATUS)) {
+            S("PPS: panel dropped after VDD release");NL();
+            return EFI_DEVICE_ERROR;
+        }
+    }
+    return EFI_SUCCESS;
 }
