@@ -29,6 +29,7 @@
 #define PW_DDI_AE_STATE     (1u << 2)
 
 #define PP_ON               (1u << 31)
+#define EDP_BLC_ENABLE      (1u << 2)
 #define PP_FORCE_VDD        (1u << 3)
 #define PP_UNLOCK           0xABCD0000u
 
