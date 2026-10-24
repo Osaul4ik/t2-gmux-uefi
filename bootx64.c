@@ -1730,9 +1730,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             }
             if (Caps.Valid && LiveEdid)
                 PanelCacheSaveOnce(BS,ImageHandle,PanelEdid,&Caps);
-            _INT_RepStr(&IR,"Panel cache: ");
-            _INT_RepStr(&IR, UsedCachedEdid?"EDID cached ":LiveEdid?"EDID live ":"EDID missing ");
-            _INT_RepStr(&IR, UsedCachedDpcd?"DPCD cached":"DPCD live/missing");
+            _INT_RepStr(&IR,(const CHAR8*)"Panel cache: ");
+            _INT_RepStr(&IR,(const CHAR8*)(UsedCachedEdid?"EDID cached ":LiveEdid?"EDID live ":"EDID missing "));
+            _INT_RepStr(&IR,(const CHAR8*)(UsedCachedDpcd?"DPCD cached":"DPCD live/missing"));
             _INT_RepNl(&IR);
             IS = _INT_InjectVbtBuiltin(BS, ImageHandle, &IR);
             if (!EFI_ERROR(IS))

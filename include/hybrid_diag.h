@@ -7,24 +7,24 @@ static UINTN HybridDiagUsed;
 static BOOLEAN HybridDiagActive;
 static EFI_BOOT_SERVICES *HybridDiagBS;
 static EFI_HANDLE HybridDiagImage;
-static void HybridDiagAppend(const CHAR8 *s) {
+static void HybridDiagAppend(const char *s) {
     if (!HybridDiagActive || !s) return;
     while (*s && HybridDiagUsed + 2 < HYBRID_DIAG_CAP)
         HybridDiagText[HybridDiagUsed++] = *s++;
 }
 static void HybridDiagHex(UINT64 v, UINTN digits) {
-    static const CHAR8 hex[] = "0123456789ABCDEF";
+    static const char hex[] = "0123456789ABCDEF";
     HybridDiagAppend("0x");
     if (digits > 16) digits = 16;
     for (UINTN i = digits; i > 0 && HybridDiagUsed + 2 < HYBRID_DIAG_CAP; i--)
         HybridDiagText[HybridDiagUsed++] = hex[(v >> ((i - 1) * 4)) & 15];
 }
-static void HybridDiagStatus(const CHAR8 *label, EFI_STATUS status) {
+static void HybridDiagStatus(const char *label, EFI_STATUS status) {
     HybridDiagAppend(label);
     HybridDiagHex((UINT64)status, 16);
     HybridDiagAppend("\r\n");
 }
-static void HybridDiagValue(const CHAR8 *label, UINT64 value, UINTN digits) {
+static void HybridDiagValue(const char *label, UINT64 value, UINTN digits) {
     HybridDiagAppend(label);
     HybridDiagHex(value, digits);
     HybridDiagAppend("\r\n");
