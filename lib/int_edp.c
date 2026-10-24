@@ -268,3 +268,89 @@ EFI_STATUS _INT_EdpProbe(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
     }
     return C->Valid ? EFI_SUCCESS : EFI_DEVICE_ERROR;
 }
+
+
+// Cold boot with an external display: Apple EFI may leave the internal panel OFF
+// even when AUX is readable via FORCE_VDD. Match the panel-power stage of i915
+// without touching pipe / PLL / DDI training or enabling backlight.
+#define PP_POWER_ON (1u << 0)
+#define PP_RESET (1u << 1)
+#define PP_ON_STATUS (1u << 31)
+
+static EFI_STATUS PpsIgpu(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image,
+                          EFI_PCI_IO_PROTOCOL **Out, _INT_Rep *R)
+{
+    EFI_STATUS st=EFI_SUCCESS;
+    UINT32 id=0,cmd=0;
+    EFI_PCI_IO_PROTOCOL *p=_INT_FindIgpu(BS,Image,&id,&st);
+    if (!p) { S("PPS: Intel device missing");NL();return EFI_NOT_FOUND; }
+    st=p->Pci.Read(p,EfiPciIoWidthUint32,4,1,&cmd);
+    if(EFI_ERROR(st))return st;
+    if(!(cmd&0x2)) {
+        st=p->Attributes(p,EfiPciIoAttributeOperationEnable,
+                         EFI_PCI_IO_ATTRIBUTE_MEMORY,NULL);
+        if(EFI_ERROR(st))return st;
+    }
+    *Out=p;
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS _INT_EdpPanelPowerState(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,
+                                   BOOLEAN *Powered,UINT32 *StatusReg,
+                                   UINT32 *ControlReg,_INT_Rep *R)
+{
+    EFI_PCI_IO_PROTOCOL *p=NULL;
+    EFI_STATUS st=PpsIgpu(BS,Image,&p,R);
+    if(EFI_ERROR(st))return st;
+    st=p->Mem.Read(p,EfiPciIoWidthUint32,0,PP_STATUS,1,StatusReg);
+    if(EFI_ERROR(st))return st;
+    st=p->Mem.Read(p,EfiPciIoWidthUint32,0,PP_CONTROL,1,ControlReg);
+    if(EFI_ERROR(st))return st;
+    if(*StatusReg==0xFFFFFFFFu||*ControlReg==0xFFFFFFFFu)return EFI_NOT_READY;
+    *Powered=((*StatusReg & PP_ON_STATUS)!=0);
+    S("PPS snapshot: status=0x");HX(*StatusReg,8);
+    S(" control=0x");HX(*ControlReg,8);
+    S(" actual panel powered=");DC(*Powered);NL();
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS _INT_EdpPanelPrepare(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,_INT_Rep *R)
+{
+    EFI_PCI_IO_PROTOCOL *p=NULL;
+    EFI_STATUS st=PpsIgpu(BS,Image,&p,R);
+    if(EFI_ERROR(st))return st;
+    DEV d={BS,p};
+    UINT32 ps=Rd(&d,PP_STATUS),pc=Rd(&d,PP_CONTROL),pw=Rd(&d,PWR_WELL_CTL2);
+    if(ps==0xFFFFFFFFu||pc==0xFFFFFFFFu||pw==0xFFFFFFFFu)
+        return EFI_NOT_READY;
+    if(ps & PP_ON_STATUS){S("PPS: already powered; not changing state");NL();return EFI_SUCCESS;}
+    // Ensure the display power domains serving PPS/DDI-A are accessible.
+    UINT32 wanted=PW_PW1_REQ|PW_DDI_AE_REQ;
+    if((pw & wanted)!=wanted) Wr(&d,PWR_WELL_CTL2,pw|wanted);
+    BOOLEAN wells=FALSE;
+    for(UINTN i=0;i<300;i++) {
+        pw=Rd(&d,PWR_WELL_CTL2);
+        if((pw&(PW_PW1_STATE|PW_DDI_AE_STATE))==
+              (PW_PW1_STATE|PW_DDI_AE_STATE)){wells=TRUE;break;}
+        BS->Stall(100);
+    }
+    if(!wells){S("PPS: power wells failed");NL();return EFI_TIMEOUT;}
+    // Intel i915 panel-on step. Do not enable EDP_BLC_ENABLE until the
+    // operating system has completed link training / modeset.
+    // Preserve firmware FORCE_VDD; firmware may have deliberately enabled AUX.
+    UINT32 next=(pc & 0x0000FFFFu) | PP_POWER_ON | PP_RESET;
+    next=(next & ~((UINT32)EDP_BLC_ENABLE)) | PP_UNLOCK;
+    Wr(&d,PP_CONTROL,next);
+    UINT32 posted=Rd(&d,PP_CONTROL);
+    S("PPS: control after panel-on request=0x");HX(posted,8);NL();
+    for(UINTN i=0;i<3000;i++) { // <= 300 ms bounded wait
+        ps=Rd(&d,PP_STATUS);
+        if(ps & PP_ON_STATUS) {
+            S("PPS: panel power ON confirmed, status=0x");HX(ps,8);NL();
+            return EFI_SUCCESS;
+        }
+        BS->Stall(100);
+    }
+    S("PPS: panel power ON TIMEOUT, status=0x");HX(ps,8);NL();
+    return EFI_TIMEOUT;
+}

@@ -36,6 +36,16 @@ BOOLEAN _INT_VbtSetLink(UINT8* v, UINTN size, UINT8 rate, UINT8 lanes,
 EFI_STATUS _INT_EdpProbe(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                          _INT_EdpCaps* C, _INT_Rep* R);
 
+// Snapshot Intel panel power at pre-Windows. PP_STATUS bit31 = actual panel power.
+// Unlike FORCE_VDD this is not merely AUX availability.
+EFI_STATUS _INT_EdpPanelPowerState(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                   BOOLEAN* Powered, UINT32* StatusReg,
+                                   UINT32* ControlReg, _INT_Rep* R);
+// Explicitly power on the built-in panel PPS after switching GMUX to Intel.
+// Does not enable DDI buffer, pipe or backlight; Windows owns link training.
+EFI_STATUS _INT_EdpPanelPrepare(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                                 _INT_Rep* R);
+
 // Built-in VBT (lib/vbt_base.c) -> OpRegion mailbox 4.
 extern const UINT8 _INT_VbtBase[];
 extern const UINTN _INT_VbtBaseSize;

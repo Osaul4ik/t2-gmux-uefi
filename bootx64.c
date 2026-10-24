@@ -1673,6 +1673,28 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             BS->Stall(10000);
         }
 
+        // Pre-patch snapshot: do not confuse FORCE_VDD (AUX only) with PP_ON.
+        BOOLEAN PanelWasPowered = TRUE;
+        UINT32 PanelStatusBefore = 0, PanelControlBefore = 0;
+        EFI_STATUS PanelStateSt = EFI_NOT_READY;
+        EFI_STATUS PanelPrepareSt = EFI_NOT_READY;
+        {
+            CHAR8 PowerLog[512];
+            _INT_Rep pr;
+            _INT_RepInit(&pr,PowerLog,sizeof(PowerLog));
+            PanelStateSt = _INT_EdpPanelPowerState(BS,ImageHandle,
+                 &PanelWasPowered,&PanelStatusBefore,&PanelControlBefore,&pr);
+            if (HybridDiagActive) {
+                HybridDiagAppend("[Panel initial power]
+");
+                HybridDiagStatus("power read=",PanelStateSt);
+                if(!EFI_ERROR(PanelStateSt)) {
+                    HybridDiagValue("PP_STATUS=",PanelStatusBefore,8);
+                    HybridDiagValue("PP_CONTROL=",PanelControlBefore,8);
+                    HybridDiagValue("panel was powered=",PanelWasPowered,1);
+                }
+            }
+        }
         // VBT inject + DDI A 4 lanes + ACPI patch
         const UINTN RCap = 8192;
         CHAR8 *RBuf = (CHAR8 *)_INT_AllocatePool(BS, RCap);
@@ -1728,6 +1750,26 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                     }
                 }
             }
+            // If Apple firmware left the panel off, prefer persistent known-good
+            // EDID/link data over potentially incomplete EFI GOP panel metadata.
+            if (!EFI_ERROR(PanelStateSt) && !PanelWasPowered && !EFI_ERROR(CacheSt)) {
+                if (!LiveEdid) {
+                    for(UINTN n=0;n<128;n++)PanelEdid[n]=CachedEdid[n];
+                    UsedCachedEdid=TRUE;
+                } else {
+                    BOOLEAN eq=TRUE;
+                    for(UINTN n=0;n<128;n++)if(PanelEdid[n]!=CachedEdid[n]){eq=FALSE;break;}
+                    if(eq)UsedCachedEdid=TRUE;
+                }
+                if(UsedCachedEdid) {
+                    for(UINTN n=0;n<128;n++)PanelEdid[n]=CachedEdid[n];
+                    Caps.Valid=TRUE;
+                    Caps.VbtRate=CacheRate;
+                    Caps.VbtLanes=CacheLanes;
+                    Caps.MaxLanes=(UINT8)(CacheLanes==3?4:CacheLanes==1?2:1);
+                    UsedCachedDpcd=TRUE;
+                }
+            }
             if (Caps.Valid && LiveEdid)
                 PanelCacheSaveOnce(BS,ImageHandle,PanelEdid,&Caps);
             _INT_RepStr(&IR,(const CHAR8*)"Panel cache: ");
@@ -1747,6 +1789,25 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 if (EFI_ERROR(ES)) {
                     _INT_VbtClearMailbox(BS, ImageHandle, &IR);
                     IS = EFI_NOT_READY;
+                }
+            }
+            // Panel-off path: after probing AUX and preparing VBT metadata,
+            // request PPS panel ON (not DDI training). Do not alter already-on boot.
+            if (!EFI_ERROR(PanelStateSt) && !PanelWasPowered) {
+                PanelPrepareSt = _INT_EdpPanelPrepare(BS,ImageHandle,&IR);
+                if (HybridDiagActive)
+                    HybridDiagStatus("PPS panel-on=",PanelPrepareSt);
+            }
+            if (HybridDiagActive && !EFI_ERROR(PanelStateSt) && !PanelWasPowered) {
+                UINT32 afterStatus=0, afterControl=0;
+                BOOLEAN afterPowered=FALSE;
+                EFI_STATUS afterSt=_INT_EdpPanelPowerState(BS,ImageHandle,
+                    &afterPowered,&afterStatus,&afterControl,&IR);
+                HybridDiagStatus("PPS final read=",afterSt);
+                if(!EFI_ERROR(afterSt)) {
+                    HybridDiagValue("PP_STATUS after=",afterStatus,8);
+                    HybridDiagValue("PP_CONTROL after=",afterControl,8);
+                    HybridDiagValue("Panel powered after=",afterPowered,1);
                 }
             }
             // Same iGPU-side setup the firmware does when it boots from the iGPU
