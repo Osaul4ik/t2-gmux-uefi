@@ -294,6 +294,7 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 #include "include/panel_cache.h"
 #include "include/hybrid_diag.h"
 
+
 // ---- UI: plain ASCII frame on the text console ----
 //
 //  +======================================================================+
@@ -1578,6 +1579,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         HybridDiagValue("iGPU NVRAM preference=", IGpuPref, 1);
         HybridDiagValue("ReBAR enabled=", Rebar, 1);
         HybridDiagValue("FSB enabled=", Fsb, 1);
+        GmuxDeepSnapshot(BS,ImageHandle,L"\\gmux_01_pre_setos.log","PRE-APPLESETOS");
     }
     // load apple_set_os - only for modes 2 / 4 / 5; mode 1 = plain Windows boot
     if (!DoSetOs) {
@@ -1630,6 +1632,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     if (AppleSetOsHandleBuf != NULL)
         _INT_FreePool(BS, AppleSetOsHandleBuf);
 
+    GmuxDeepSnapshot(BS,ImageHandle,L"\\gmux_02_post_setos.log","POST-APPLESETOS-PRE-GMUX");
+
     // ---- modes 4 / 5: gmux panel switch, (4: dGPU rail OFF), VBT inject, ACPI patch ----
     // Never power the dGPU rail back on from Windows after OFF (known hang on this HW).
     if (DoSwitch) {
@@ -1641,6 +1645,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         if (HybridDiagActive) {
             HybridDiagAppend("[GMUX switch]\r\n");
             HybridDiagValue("panel to iGPU success=", MuxOk, 1);
+            GmuxDeepSnapshot(BS,ImageHandle,L"\\gmux_03_post_gmux.log","POST-GMUX-PRE-PPS");
         }
         if (MuxOk) {
             LOG(&gs, PR_MUX, L"Gmux: route OK, readback=iGPU");
@@ -1819,6 +1824,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             // ACPI patch (brightness via gmux) from the ESP root: mode 4 = SSDT_IGPU.aml,
             // mode 5 = SSDT_IGPU_BRT.aml (brightness + resume re-route).
             AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, AcpiFile, &IR);
+            GmuxDeepSnapshot(BS,ImageHandle,L"\\gmux_04_post_pps.log","POST-PPS-VBT-ACPI");
             if (HybridDiagActive) {
                 HybridDiagValue("EDID cache used=", UsedCachedEdid, 1);
                 HybridDiagValue("DPCD cache used=", UsedCachedDpcd, 1);
@@ -1921,6 +1927,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     if (HybridDiagActive) {
         HybridDiagAppend("[Pre-Windows]\r\n");
+        GmuxDeepSnapshot(BS,ImageHandle,L"\\gmux_05_pre_windows.log","PRE-WINDOWS-PRE-STARTIMAGE");
         EFI_STATUS LogStatus = HybridDiagFlush();
         LOG(&gs, PR_BOOT, L"Hybrid diagnostic ESP write: %s (%lX)",
             EFI_ERROR(LogStatus) ? L"FAILED" : L"OK", LogStatus);
