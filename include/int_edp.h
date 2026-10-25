@@ -66,6 +66,11 @@ EFI_STATUS _INT_EdpReadPps(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 EFI_STATUS _INT_EdpRestorePps(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                               const _INT_EdpPps* Cached, _INT_Rep* R);
 
+// Drop the driver-level (PWR_WELL_CTL2) requests for PW1 / DDI_A_E that the loader made for its
+// AUX and panel work. The firmware boots with them clear (the BIOS register holds the wells), so
+// this hands the iGPU to the OS driver in the state the firmware left it in.
+EFI_STATUS _INT_EdpReleaseWells(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_Rep* R);
+
 // Built-in VBT (lib/vbt_base.c) -> OpRegion mailbox 4.
 extern const UINT8 _INT_VbtBase[];
 extern const UINTN _INT_VbtBaseSize;

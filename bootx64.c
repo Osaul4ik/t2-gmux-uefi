@@ -292,6 +292,18 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 }
 
 #include "include/panel_cache.h"
+
+// Bisect switches for the external-display hybrid boot: an empty file in the ESP root.
+//   \gmux_x_nopanel.flag  : leave the internal panel exactly as the firmware left it
+//                           (no PPS restore, no panel power-up)
+//   \gmux_x_relwells.flag : drop the loader's own power-well requests before Windows starts
+static BOOLEAN EspFlagPresent(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, CHAR16 *Name)
+{
+    VOID *data = NULL; UINTN size = 0;
+    EFI_STATUS st = _INT_ReadEspFile(BS, Image, Name, &data, &size);
+    if (!EFI_ERROR(st) && data) BS->FreePool(data);
+    return !EFI_ERROR(st);
+}
 #include "include/hybrid_diag.h"
 
 
@@ -1782,6 +1794,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             }
             // Firmware lit the panel: this is the known-good state. Remember all of it.
             EFI_STATUS StoreSt = EFI_NOT_READY;
+            BOOLEAN StoreTried = FALSE;
             if (FwPanelOn) {
                 EFI_STATUS PpsRd = _INT_EdpReadPps(BS, ImageHandle, &LivePps, &IR);
                 if (EFI_ERROR(PpsRd)) LivePps.Valid = FALSE;
@@ -1790,9 +1803,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 // Keep the previously cached timing when this boot could not read it.
                 const _INT_EdpPps *PpsToStore = LivePps.Valid ? &LivePps : &CachePps;
                 StoreSt = PanelCacheStore(BS, ImageHandle, PanelEdid, &Caps, PpsToStore);
+                StoreTried = TRUE;
             }
             if (HybridDiagActive)
-                HybridDiagStatus("cache store=", StoreSt);   // 0x...:written, ALREADY_STARTED: unchanged
+            {
+                HybridDiagValue("cache store attempted=", StoreTried, 1);   // 0 = cache was the source
+                if (StoreTried) HybridDiagStatus("cache store=", StoreSt);  // 0 written, ALREADY_STARTED unchanged
+            }
             _INT_RepStr(&IR,(const CHAR8*)"Panel cache: ");
             _INT_RepStr(&IR,(const CHAR8*)(UsedCachedEdid?"EDID cached ":LiveEdid?"EDID live ":"EDID missing "));
             _INT_RepStr(&IR,(const CHAR8*)(UsedCachedDpcd?"DPCD cached":"DPCD live/missing"));
@@ -1815,7 +1832,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             }
             // Panel-off path: after probing AUX and preparing VBT metadata,
             // request PPS panel ON (not DDI training). Do not alter already-on boot.
-            if (!EFI_ERROR(PanelStateSt) && !PanelWasPowered) {
+            BOOLEAN XNoPanel   = EspFlagPresent(BS, ImageHandle, L"\\gmux_x_nopanel.flag");
+            BOOLEAN XRelWells  = EspFlagPresent(BS, ImageHandle, L"\\gmux_x_relwells.flag");
+            if (HybridDiagActive) {
+                HybridDiagValue("experiment nopanel=", XNoPanel, 1);
+                HybridDiagValue("experiment relwells=", XRelWells, 1);
+            }
+            if (!EFI_ERROR(PanelStateSt) && !PanelWasPowered && !XNoPanel) {
                 // i915 programs rawclk + PP_DIVISOR + delays before the first power-up; the
                 // firmware did not (it left PP_DIVISOR = 0 with an external display).
                 EFI_STATUS PpsRestoreSt = _INT_EdpRestorePps(BS,ImageHandle,&CachePps,&IR);
@@ -1847,6 +1870,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             // ACPI patch (brightness via gmux) from the ESP root: mode 4 = SSDT_IGPU.aml,
             // mode 5 = SSDT_IGPU_BRT.aml (brightness + resume re-route).
             AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, AcpiFile, &IR);
+            if (XRelWells) {
+                EFI_STATUS RelSt = _INT_EdpReleaseWells(BS, ImageHandle, &IR);
+                if (HybridDiagActive) HybridDiagStatus("power wells released=", RelSt);
+            }
             GmuxDeepSnapshot(BS,ImageHandle,L"\\gmux_04_post_pps.log","POST-PPS-VBT-ACPI");
             if (HybridDiagActive) {
                 HybridDiagValue("EDID cache used=", UsedCachedEdid, 1);

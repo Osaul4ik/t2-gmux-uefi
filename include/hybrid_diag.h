@@ -68,6 +68,15 @@ static void GmuxDeepHex(UINT64 x, UINTN digits) {
     }
 }
 static void GmuxDeepVal(const char *key, UINT64 v,UINTN n){GmuxDeepStr(key);GmuxDeepHex(v,n);GmuxDeepStr("\r\n");}
+// Config space 0x40..0xFF (read only): GGC / BDSM / BGSM / TOLUD, i.e. the stolen memory and GTT
+// set-up the firmware did for the iGPU, which the OS graphics driver depends on.
+static void GmuxDeepCfgRange(EFI_PCI_IO_PROTOCOL *p,UINTN from,UINTN to) {
+    for(UINTN o=from;o<to;o+=4){
+        UINT32 v=0;
+        if(EFI_ERROR(p->Pci.Read(p,EfiPciIoWidthUint32,(UINT32)o,1,&v)))continue;
+        GmuxDeepStr("CFG+");GmuxDeepHex(o,2);GmuxDeepStr("=");GmuxDeepHex(v,8);GmuxDeepStr("\r\n");
+    }
+}
 static void GmuxDeepPci(EFI_BOOT_SERVICES *bs,EFI_HANDLE image) {
     EFI_GUID guid=EFI_PCI_IO_PROTOCOL_GUID;
     EFI_HANDLE *handles=NULL; UINTN count=0;
@@ -83,6 +92,13 @@ static void GmuxDeepPci(EFI_BOOT_SERVICES *bs,EFI_HANDLE image) {
         if(EFI_ERROR(st))continue;
         UINTN vendor=(UINTN)cfg[0]|((UINTN)cfg[1]<<8);
         UINTN device=(UINTN)cfg[2]|((UINTN)cfg[3]<<8);
+        if (vendor==0x8086) {                       // host bridge 00:00.0 (GGC, BDSM, BGSM, TOLUD)
+            UINTN s0=0,b0=0,d0=0,f0=0;
+            if(!EFI_ERROR(p->GetLocation(p,&s0,&b0,&d0,&f0)) && b0==0 && d0==0 && f0==0) {
+                GmuxDeepStr("\r\nHOST BRIDGE PCI ");GmuxDeepHex(vendor,4);GmuxDeepStr(":");GmuxDeepHex(device,4);GmuxDeepStr("\r\n");
+                GmuxDeepCfgRange(p,0x40,0x100);
+            }
+        }
         if ((vendor!=0x8086 && vendor!=0x1002) || cfg[11]!=3)continue;
         UINTN seg=0,bus=0,dev=0,func=0;
         st=p->GetLocation(p,&seg,&bus,&dev,&func);
@@ -97,6 +113,7 @@ static void GmuxDeepPci(EFI_BOOT_SERVICES *bs,EFI_HANDLE image) {
             GmuxDeepStr("CFG+");GmuxDeepHex(o,2);GmuxDeepStr("=");GmuxDeepHex(val,8);GmuxDeepStr("\r\n");
         }
         if(vendor!=0x8086)continue;
+        GmuxDeepCfgRange(p,0x40,0x100);              // iGPU config incl. GMCH_CTRL, BDSM, ASLS
         UINT32 asls=0;
         st=p->Pci.Read(p,EfiPciIoWidthUint32,0xFC,1,&asls);
         GmuxDeepVal("ASLS status=",st,16); if(!EFI_ERROR(st))GmuxDeepVal("ASLS=",asls,8);

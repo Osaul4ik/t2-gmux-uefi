@@ -453,3 +453,19 @@ EFI_STATUS _INT_EdpRestorePps(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,const _INT_
     S(" div=0x");HX(Rd(&d,PP_DIVISOR),8);NL();
     return EFI_SUCCESS;
 }
+
+EFI_STATUS _INT_EdpReleaseWells(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,_INT_Rep *R)
+{
+    EFI_PCI_IO_PROTOCOL *p=NULL;
+    EFI_STATUS st=PpsIgpu(BS,Image,&p,R);
+    if(EFI_ERROR(st))return st;
+    DEV d={BS,p};
+    UINT32 pw=Rd(&d,PWR_WELL_CTL2);
+    if(pw==0xFFFFFFFFu)return EFI_NOT_READY;
+    UINT32 req=PW_PW1_REQ|PW_DDI_AE_REQ;
+    if(pw & req) {
+        Wr(&d,PWR_WELL_CTL2,pw & ~req);
+        S("Power wells: driver requests released, PWR_WELL_CTL2=0x");HX(Rd(&d,PWR_WELL_CTL2),8);NL();
+    }
+    return EFI_SUCCESS;
+}
