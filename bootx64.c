@@ -1708,6 +1708,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         EFI_STATUS ES = EFI_NOT_FOUND;
         EFI_STATUS DS = EFI_NOT_READY;
         BOOLEAN EdidFromAux = FALSE;
+        BOOLEAN EdidFromCache = FALSE;
         BOOLEAN Skip4Lanes = FALSE;
         _INT_EdpCaps Caps;
         for (UINTN k = 0; k < sizeof(Caps); k++)
@@ -1715,67 +1716,83 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         if (RBuf != NULL) {
             _INT_Rep IR;
             _INT_RepInit(&IR, RBuf, RCap);
-            // The iGPU trains the link itself, so ask the panel what it can do: DPCD
-            // (rate / lanes / PSR) and EDID over the iGPU's own AUX-A channel.
-            EFI_STATUS ProbeSt = _INT_EdpProbe(BS, ImageHandle, &Caps, &IR);
+            // Where the panel data comes from:
+            //  * Firmware lit the internal panel (no external display): read everything from the
+            //    panel itself (AUX DPCD + EDID, PPS timing) and refresh the ESP cache with it.
+            //  * Firmware did NOT light it (external display is primary): the GOP / EDID memory of
+            //    the AMD GPU describes the EXTERNAL monitor. All panel data then comes from the ESP
+            //    cache; the AUX probe is only the fallback when no cache exists yet.
+            BOOLEAN FwPanelOn = (!EFI_ERROR(PanelStateSt) && PanelWasPowered);
+            BOOLEAN ExtMode   = (!EFI_ERROR(PanelStateSt) && !PanelWasPowered);
+            UINT8 PanelEdid[128], CachedEdid[128];
+            BOOLEAN LiveEdid = FALSE, UsedCachedEdid = FALSE, UsedCachedDpcd = FALSE;
+            _INT_EdpCaps CacheCaps;
+            _INT_EdpPps CachePps, LivePps;
+            for (UINTN k = 0; k < sizeof(CacheCaps); k++) ((UINT8 *)&CacheCaps)[k] = 0;
+            for (UINTN k = 0; k < sizeof(CachePps); k++) ((UINT8 *)&CachePps)[k] = 0;
+            for (UINTN k = 0; k < sizeof(LivePps); k++) ((UINT8 *)&LivePps)[k] = 0;
+            EFI_STATUS CacheSt = PanelCacheLoad(BS, ImageHandle, CachedEdid, &CacheCaps, &CachePps);
+            EFI_STATUS ProbeSt = EFI_SUCCESS;
+            if (ExtMode && !EFI_ERROR(CacheSt)) {
+                PanelCapsCopyLink(&Caps, &CacheCaps);
+                for (UINTN n = 0; n < 128; n++) PanelEdid[n] = CachedEdid[n];
+                UsedCachedEdid = TRUE;
+                UsedCachedDpcd = TRUE;
+                _INT_RepStr(&IR, (const CHAR8 *)"Panel data: external display boot, EDID + link + PPS from ESP cache (AUX probe skipped)");
+                _INT_RepNl(&IR);
+            } else {
+                // The iGPU trains the link itself, so ask the panel what it can do: DPCD
+                // (rate / lanes / PSR) and EDID over the iGPU's own AUX-A channel.
+                ProbeSt = _INT_EdpProbe(BS, ImageHandle, &Caps, &IR);
+                // The panel's own EDID (AUX) is authoritative. The firmware / GOP EDID is only
+                // trusted when the firmware lit the panel itself: with an external display it
+                // can be the external monitor's (even an Apple one passes the "APP" test).
+                if (Caps.HasEdid && PanelEdidOk(Caps.Edid)) {
+                    for (UINTN n = 0; n < 128; n++) PanelEdid[n] = Caps.Edid[n];
+                    LiveEdid = TRUE;
+                    EdidFromAux = TRUE;
+                } else if (!ExtMode) {
+                    EFI_STATUS FirmwareEdidSt = _INT_GetFirmwarePanelEdid(BS, ImageHandle, PanelEdid);
+                    if (!EFI_ERROR(FirmwareEdidSt) && PanelEdidOk(PanelEdid))
+                        LiveEdid = TRUE;
+                }
+                // Fall back to the cache only when it describes the same panel as the live EDID.
+                if (!EFI_ERROR(CacheSt)) {
+                    BOOLEAN Same = TRUE;
+                    if (LiveEdid) for (UINTN n = 0; n < 128; n++) if (PanelEdid[n] != CachedEdid[n]) { Same = FALSE; break; }
+                    if (Same) {
+                        if (!LiveEdid) {
+                            for (UINTN n = 0; n < 128; n++) PanelEdid[n] = CachedEdid[n];
+                            UsedCachedEdid = TRUE;
+                        }
+                        if (!Caps.Valid) {
+                            PanelCapsCopyLink(&Caps, &CacheCaps);
+                            UsedCachedDpcd = TRUE;
+                        }
+                    }
+                }
+            }
             if (HybridDiagActive) {
+                HybridDiagValue("external-display boot=", ExtMode, 1);
                 HybridDiagStatus("eDP probe=", ProbeSt);
                 HybridDiagValue("DPCD valid=", Caps.Valid, 1);
                 HybridDiagValue("AUX EDID=", Caps.HasEdid, 1);
                 HybridDiagValue("max lanes=", Caps.MaxLanes, 2);
                 HybridDiagValue("VBT lanes code=", Caps.VbtLanes, 2);
             }
-            // Firmware EDID is normally exposed by AMD GOP; AUX EDID is preferred
-            // only when the firmware does not publish the internal APP panel.
-            UINT8 PanelEdid[128];
-            BOOLEAN LiveEdid = FALSE, UsedCachedEdid = FALSE, UsedCachedDpcd = FALSE;
-            EFI_STATUS FirmwareEdidSt = _INT_GetFirmwarePanelEdid(BS, ImageHandle, PanelEdid);
-            if (!EFI_ERROR(FirmwareEdidSt) && PanelEdidOk(PanelEdid))
-                LiveEdid = TRUE;
-            else if (Caps.HasEdid && PanelEdidOk(Caps.Edid)) {
-                for (UINTN n=0;n<128;n++) PanelEdid[n]=Caps.Edid[n];
-                LiveEdid = TRUE;
+            // Firmware lit the panel: this is the known-good state. Remember all of it.
+            EFI_STATUS StoreSt = EFI_NOT_READY;
+            if (FwPanelOn) {
+                EFI_STATUS PpsRd = _INT_EdpReadPps(BS, ImageHandle, &LivePps, &IR);
+                if (EFI_ERROR(PpsRd)) LivePps.Valid = FALSE;
             }
-            // Accept cache link data only if panel EDID agrees with any live EDID.
-            UINT8 CachedEdid[128], CacheRate=0, CacheLanes=0;
-            EFI_STATUS CacheSt = PanelCacheLoad(BS,ImageHandle,CachedEdid,&CacheRate,&CacheLanes);
-            if (!EFI_ERROR(CacheSt)) {
-                BOOLEAN Same = TRUE;
-                if (LiveEdid)for(UINTN n=0;n<128;n++)if(PanelEdid[n]!=CachedEdid[n]){Same=FALSE;break;}
-                if (Same) {
-                    if (!LiveEdid) {
-                        for(UINTN n=0;n<128;n++)PanelEdid[n]=CachedEdid[n];
-                        UsedCachedEdid=TRUE;
-                    }
-                    if (!Caps.Valid) {
-                        Caps.Valid=TRUE; Caps.VbtRate=CacheRate; Caps.VbtLanes=CacheLanes;
-                        Caps.MaxLanes=(UINT8)(CacheLanes==3?4:CacheLanes==1?2:1);
-                        UsedCachedDpcd=TRUE;
-                    }
-                }
+            if (Caps.Valid && LiveEdid && !UsedCachedDpcd) {
+                // Keep the previously cached timing when this boot could not read it.
+                const _INT_EdpPps *PpsToStore = LivePps.Valid ? &LivePps : &CachePps;
+                StoreSt = PanelCacheStore(BS, ImageHandle, PanelEdid, &Caps, PpsToStore);
             }
-            // If Apple firmware left the panel off, prefer persistent known-good
-            // EDID/link data over potentially incomplete EFI GOP panel metadata.
-            if (!EFI_ERROR(PanelStateSt) && !PanelWasPowered && !EFI_ERROR(CacheSt)) {
-                if (!LiveEdid) {
-                    for(UINTN n=0;n<128;n++)PanelEdid[n]=CachedEdid[n];
-                    UsedCachedEdid=TRUE;
-                } else {
-                    BOOLEAN eq=TRUE;
-                    for(UINTN n=0;n<128;n++)if(PanelEdid[n]!=CachedEdid[n]){eq=FALSE;break;}
-                    if(eq)UsedCachedEdid=TRUE;
-                }
-                if(UsedCachedEdid) {
-                    for(UINTN n=0;n<128;n++)PanelEdid[n]=CachedEdid[n];
-                    Caps.Valid=TRUE;
-                    Caps.VbtRate=CacheRate;
-                    Caps.VbtLanes=CacheLanes;
-                    Caps.MaxLanes=(UINT8)(CacheLanes==3?4:CacheLanes==1?2:1);
-                    UsedCachedDpcd=TRUE;
-                }
-            }
-            if (Caps.Valid && LiveEdid)
-                PanelCacheSaveOnce(BS,ImageHandle,PanelEdid,&Caps);
+            if (HybridDiagActive)
+                HybridDiagStatus("cache store=", StoreSt);   // 0x...:written, ALREADY_STARTED: unchanged
             _INT_RepStr(&IR,(const CHAR8*)"Panel cache: ");
             _INT_RepStr(&IR,(const CHAR8*)(UsedCachedEdid?"EDID cached ":LiveEdid?"EDID live ":"EDID missing "));
             _INT_RepStr(&IR,(const CHAR8*)(UsedCachedDpcd?"DPCD cached":"DPCD live/missing"));
@@ -1786,9 +1803,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             // Use validated internal-panel EDID: firmware, AUX, or saved ESP cache.
             if (!EFI_ERROR(IS)) {
                 if (LiveEdid || UsedCachedEdid) {
+                    EdidFromCache = UsedCachedEdid;
                     ES = _INT_VbtApplyEdidBuf(BS, ImageHandle, PanelEdid, 128,
                            UsedCachedEdid ? "ESP panel cache" : "live internal panel", &IR);
-                    EdidFromAux = LiveEdid && EFI_ERROR(FirmwareEdidSt);
+                    EdidFromCache = UsedCachedEdid;
                 }
                 if (EFI_ERROR(ES)) {
                     _INT_VbtClearMailbox(BS, ImageHandle, &IR);
@@ -1798,6 +1816,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             // Panel-off path: after probing AUX and preparing VBT metadata,
             // request PPS panel ON (not DDI training). Do not alter already-on boot.
             if (!EFI_ERROR(PanelStateSt) && !PanelWasPowered) {
+                // i915 programs rawclk + PP_DIVISOR + delays before the first power-up; the
+                // firmware did not (it left PP_DIVISOR = 0 with an external display).
+                EFI_STATUS PpsRestoreSt = _INT_EdpRestorePps(BS,ImageHandle,&CachePps,&IR);
+                if (HybridDiagActive)
+                    HybridDiagStatus("PPS timing restore=",PpsRestoreSt);
                 PanelPrepareSt = _INT_EdpPanelPrepare(BS,ImageHandle,&IR);
                 if (HybridDiagActive)
                     HybridDiagStatus("PPS panel-on=",PanelPrepareSt);
@@ -1843,7 +1866,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         LOG(&gs, PR_VBT, L"VBT %s (%lX): link %s, EDID %s",
             EFI_ERROR(IS) ? L"FAILED" : L"OK", IS,
             EFI_ERROR(DS) ? L"default 4xHBR2 (probe failed)" : L"from panel DPCD",
-            EFI_ERROR(ES) ? L"not applied" : (EdidFromAux ? L"from panel" : L"from dGPU"));
+            EFI_ERROR(ES) ? L"not applied" : (EdidFromCache ? L"from ESP cache" : (EdidFromAux ? L"from panel" : L"from firmware")));
         if (Skip4Lanes)
             LOG(&gs, PR_DDI, L"DDI A 4 lanes: skipped (panel reports %lX lane(s))", (UINTN)Caps.MaxLanes);
         else

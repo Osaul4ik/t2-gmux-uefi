@@ -12,6 +12,10 @@
 #define PWR_WELL_CTL2       0x45404
 #define PP_STATUS           0xC7200
 #define PP_CONTROL          0xC7204
+#define PP_ON_DELAYS        0xC7208
+#define PP_OFF_DELAYS       0xC720C
+#define PP_DIVISOR          0xC7210
+#define PCH_RAWCLK_FREQ     0xC6204
 
 #define AUX_SEND_BUSY       (1u << 31)
 #define AUX_DONE            (1u << 30)
@@ -402,5 +406,50 @@ EFI_STATUS _INT_EdpPanelPrepare(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,_INT_Rep 
             return EFI_DEVICE_ERROR;
         }
     }
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS _INT_EdpReadPps(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,_INT_EdpPps *P,_INT_Rep *R)
+{
+    EFI_PCI_IO_PROTOCOL *p=NULL;
+    P->Valid=FALSE;P->OnDelays=P->OffDelays=P->Divisor=P->RawClk=0;
+    EFI_STATUS st=PpsIgpu(BS,Image,&p,R);
+    if(EFI_ERROR(st))return st;
+    DEV d={BS,p};
+    UINT32 on=Rd(&d,PP_ON_DELAYS),off=Rd(&d,PP_OFF_DELAYS),dv=Rd(&d,PP_DIVISOR),rc=Rd(&d,PCH_RAWCLK_FREQ);
+    if(on==0xFFFFFFFFu||off==0xFFFFFFFFu||dv==0xFFFFFFFFu||rc==0xFFFFFFFFu)return EFI_NOT_READY;
+    P->OnDelays=on;P->OffDelays=off;P->Divisor=dv;P->RawClk=rc;
+    P->Valid=(on!=0||off!=0);
+    S("PPS timing: on=0x");HX(on,8);S(" off=0x");HX(off,8);S(" div=0x");HX(dv,8);S(" rawclk=0x");HX(rc,8);NL();
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS _INT_EdpRestorePps(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,const _INT_EdpPps *C,_INT_Rep *R)
+{
+    EFI_PCI_IO_PROTOCOL *p=NULL;
+    if(!C||!C->Valid)return EFI_NOT_FOUND;
+    EFI_STATUS st=PpsIgpu(BS,Image,&p,R);
+    if(EFI_ERROR(st))return st;
+    DEV d={BS,p};
+    UINT32 ps=Rd(&d,PP_STATUS),pc=Rd(&d,PP_CONTROL);
+    UINT32 on=Rd(&d,PP_ON_DELAYS),off=Rd(&d,PP_OFF_DELAYS),dv=Rd(&d,PP_DIVISOR),rc=Rd(&d,PCH_RAWCLK_FREQ);
+    if(ps==0xFFFFFFFFu||pc==0xFFFFFFFFu||on==0xFFFFFFFFu||dv==0xFFFFFFFFu||rc==0xFFFFFFFFu)
+        return EFI_NOT_READY;
+    if(ps & PP_ON)return EFI_SUCCESS;                      // panel running: never touch the timing
+    BOOLEAN need_rc=(rc==0 && C->RawClk!=0);
+    BOOLEAN need_dv=((dv>>8)==0 && (C->Divisor>>8)!=0);
+    BOOLEAN need_on=(on==0 && C->OnDelays!=0);
+    BOOLEAN need_off=(off==0 && C->OffDelays!=0);
+    if(!need_rc&&!need_dv&&!need_on&&!need_off)return EFI_SUCCESS;
+    // i915 order: rawclk first (the divider is derived from it), then the PPS registers,
+    // which need the unlock key in PP_CONTROL.
+    if(need_rc)Wr(&d,PCH_RAWCLK_FREQ,C->RawClk);
+    Wr(&d,PP_CONTROL,(pc & 0x0000FFFFu)|PP_UNLOCK);
+    if(need_on)Wr(&d,PP_ON_DELAYS,C->OnDelays);
+    if(need_off)Wr(&d,PP_OFF_DELAYS,C->OffDelays);
+    if(need_dv)Wr(&d,PP_DIVISOR,C->Divisor);
+    S("PPS timing restored from cache: rawclk=0x");HX(Rd(&d,PCH_RAWCLK_FREQ),8);
+    S(" on=0x");HX(Rd(&d,PP_ON_DELAYS),8);S(" off=0x");HX(Rd(&d,PP_OFF_DELAYS),8);
+    S(" div=0x");HX(Rd(&d,PP_DIVISOR),8);NL();
     return EFI_SUCCESS;
 }

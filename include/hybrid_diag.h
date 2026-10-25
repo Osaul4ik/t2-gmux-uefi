@@ -149,7 +149,11 @@ static void GmuxDeepPci(EFI_BOOT_SERVICES *bs,EFI_HANDLE image) {
             0x45404, // PWR_WELL_CTL2 (driver request/state)
             0x45504, // DC_STATE_EN
             0x45008, // DBUF_CTL
+            0xC6204, // PCH_RAWCLK_FREQ (PPS divider is derived from it)
+            0xC2014, // SFUSE_STRAP
             0xC7200,0xC7204,0xC7208,0xC720C,0xC7210, // PP_STATUS/CONTROL/ON_DELAYS/OFF_DELAYS/DIVISOR
+            0xC6204, // PCH_RAWCLK_FREQ (PP_DIVISOR is derived from it)
+            0xC2014, // SFUSE_STRAP (bit 8 = 24 MHz rawclk)
             0x64000, // DDI_BUF_CTL_A
             0x64040, // DP_TP_CTL_A (0x80040340 = link trained, normal pattern)
             0x64044, // DP_TP_STATUS_A
@@ -175,7 +179,8 @@ static void GmuxDeepPci(EFI_BOOT_SERVICES *bs,EFI_HANDLE image) {
         };
         static const char *names[]={
             "PWR_WELL_CTL1=","PWR_WELL_CTL2=","DC_STATE_EN=","DBUF_CTL=",
-            "PP_STATUS=","PP_CONTROL=","PP_ON_DELAYS=","PP_OFF_DELAYS=","PP_DIVISOR=",
+            "PCH_RAWCLK_FREQ=","SFUSE_STRAP=","PP_STATUS=","PP_CONTROL=","PP_ON_DELAYS=","PP_OFF_DELAYS=","PP_DIVISOR=",
+            "PCH_RAWCLK_FREQ=","SFUSE_STRAP=",
             "DDI_BUF_CTL_A=","DP_TP_CTL_A=","DP_TP_STATUS_A=","AUX_CTL_A=",
             "DDI_BUF_CTL_B=","DDI_BUF_CTL_C=","DDI_BUF_CTL_D=",
             "CDCLK_CTL=","LCPLL1_CTL=","DPLL_CTRL1=","DPLL_CTRL2=","DPLL_STATUS=",

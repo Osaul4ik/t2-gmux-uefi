@@ -18,6 +18,18 @@ typedef struct {
     UINT8   Edid[128];
 } _INT_EdpCaps;
 
+// Panel power sequencer timing as the FIRMWARE programmed it. On a boot where the firmware lit
+// the internal panel these are the known-good values; on a boot with an external display the
+// firmware leaves PP_DIVISOR / rawclk at reset (0) and i915 would program them before the first
+// power-up, so the loader restores them from the ESP cache.
+typedef struct {
+    BOOLEAN Valid;
+    UINT32  OnDelays;       // PP_ON_DELAYS
+    UINT32  OffDelays;      // PP_OFF_DELAYS
+    UINT32  Divisor;        // PP_DIVISOR (reference divider [31:8], power cycle delay [4:0])
+    UINT32  RawClk;         // PCH_RAWCLK_FREQ
+} _INT_EdpPps;
+
 // First Intel display-class PCI device (the iGPU), NULL if not visible.
 EFI_PCI_IO_PROTOCOL* _INT_FindIgpu(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                                    UINT32* IdOut, EFI_STATUS* StOut);
@@ -45,6 +57,14 @@ EFI_STATUS _INT_EdpPanelPowerState(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle
 // Does not enable DDI buffer, pipe or backlight; Windows owns link training.
 EFI_STATUS _INT_EdpPanelPrepare(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
                                  _INT_Rep* R);
+
+// Read the sequencer timing registers (Valid = firmware programmed them).
+EFI_STATUS _INT_EdpReadPps(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                           _INT_EdpPps* P, _INT_Rep* R);
+// Panel OFF only: write cached timing into registers that are still at reset value (0).
+// Never overwrites a value the firmware already programmed. Call before _INT_EdpPanelPrepare.
+EFI_STATUS _INT_EdpRestorePps(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                              const _INT_EdpPps* Cached, _INT_Rep* R);
 
 // Built-in VBT (lib/vbt_base.c) -> OpRegion mailbox 4.
 extern const UINT8 _INT_VbtBase[];
