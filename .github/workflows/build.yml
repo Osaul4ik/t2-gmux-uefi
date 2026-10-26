@@ -18,7 +18,9 @@ env:
 jobs:
   build:
     name: Build bootx64.efi
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to a toolchain (gcc 15) where objcopy rejects the linked
+    # bootx64.so ("file format not recognized"). 24.04 (gcc 13) is the toolchain this builds with.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
