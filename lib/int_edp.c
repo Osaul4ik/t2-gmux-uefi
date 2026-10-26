@@ -469,3 +469,312 @@ EFI_STATUS _INT_EdpReleaseWells(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,_INT_Rep 
     }
     return EFI_SUCCESS;
 }
+
+// =====================================================================================
+// Display state capture / replay (see int_edp.h)
+// =====================================================================================
+#define DPLL_CTRL1            0x6C058
+#define DPLL_CTRL2            0x6C05C
+#define DPLL_STATUS           0x6C060
+#define DDI_BUF_CTL_A         0x64000
+#define DP_TP_CTL_A           0x64040
+#define DP_TP_STATUS_A        0x64044
+#define DDI_BUF_TRANS_A       0x64E00
+#define TRANS_HTOTAL_EDP      0x6F000
+#define TRANS_VTOTAL_EDP      0x6F00C
+#define TRANS_MSA_MISC_EDP    0x6F410
+#define TRANS_DDI_FUNC_EDP    0x6F400
+#define PIPECONF_EDP          0x7F008
+#define PIPESRC_A             0x6001C
+#define PIPE_BOTTOM_COLOR_A   0x70034
+#define BLC_PWM_CTL1          0xC8250
+#define BLC_PWM_FREQ          0xC8254
+#define BLC_PWM_DUTY          0xC8258
+
+#define DDI_BUF_ENABLE        (1u << 31)
+#define DDI_BUF_IDLE          (1u << 7)
+#define DDI_BUF_TRANS_SEL(n)  ((UINT32)(n) << 24)
+#define DDI_BUF_TRANS_MASK    (0xFu << 24)
+#define TP_ENABLE             (1u << 31)
+#define TP_ENHANCED           (1u << 18)
+#define TP_PAT1               (0u << 8)
+#define TP_PAT2               (1u << 8)
+#define TP_IDLE               (2u << 8)
+#define TP_NORMAL             (3u << 8)
+#define TP_PAT3               (4u << 8)
+#define TP_STATUS_IDLE_DONE   (1u << 25)
+#define FUNC_ENABLE           (1u << 31)
+#define PIPECONF_ENABLE       (1u << 31)
+
+static const UINT32 kDispRegs[] = {
+    DPLL_CTRL1, DPLL_CTRL2,
+    0x64E00,0x64E04,0x64E08,0x64E0C,0x64E10,0x64E14,0x64E18,0x64E1C,0x64E20,0x64E24,
+    0x64E28,0x64E2C,0x64E30,0x64E34,0x64E38,0x64E3C,0x64E40,0x64E44,0x64E48,0x64E4C,
+    DDI_BUF_CTL_A, DP_TP_CTL_A,
+    0x6F000,0x6F004,0x6F008,0x6F00C,0x6F010,0x6F014,0x6F028,   // HTOTAL..VSYNC, VSYNCSHIFT
+    0x6F030,0x6F034,0x6F040,0x6F044,TRANS_MSA_MISC_EDP,        // data / link M N, MSA misc
+    TRANS_DDI_FUNC_EDP, PIPECONF_EDP,
+    BLC_PWM_CTL1, BLC_PWM_FREQ, BLC_PWM_DUTY
+};
+
+static BOOLEAN DispGet(const _INT_DispState* St, UINT32 off, UINT32* v)
+{
+    for (UINT32 i = 0; i < St->Count && i < _INT_DISP_MAX; i++)
+        if (St->R[i].Off == off) { if (v) *v = St->R[i].Val; return TRUE; }
+    return FALSE;
+}
+
+EFI_STATUS _INT_DispCapture(EFI_BOOT_SERVICES* BS, EFI_HANDLE Image, _INT_DispState* St, _INT_Rep* R)
+{
+    EFI_PCI_IO_PROTOCOL* p = NULL;
+    St->Count = 0;
+    EFI_STATUS st = PpsIgpu(BS, Image, &p, R);
+    if (EFI_ERROR(st)) return st;
+    DEV d = { BS, p };
+    for (UINTN i = 0; i < sizeof(kDispRegs) / sizeof(kDispRegs[0]) && St->Count < _INT_DISP_MAX; i++) {
+        UINT32 v = Rd(&d, kDispRegs[i]);
+        if (v == 0xFFFFFFFFu) { St->Count = 0; return EFI_NOT_READY; }
+        St->R[St->Count].Off = kDispRegs[i];
+        St->R[St->Count].Val = v;
+        St->Count++;
+    }
+    UINT32 buf = 0, tp = 0, fn = 0, pc = 0;
+    DispGet(St, DDI_BUF_CTL_A, &buf); DispGet(St, DP_TP_CTL_A, &tp);
+    DispGet(St, TRANS_DDI_FUNC_EDP, &fn); DispGet(St, PIPECONF_EDP, &pc);
+    if (!(buf & DDI_BUF_ENABLE) || !(tp & TP_ENABLE) || !(fn & FUNC_ENABLE) || !(pc & PIPECONF_ENABLE)) {
+        S("Display state: eDP pipeline not lit, nothing captured"); NL();
+        St->Count = 0;
+        return EFI_NOT_READY;
+    }
+    S("Display state captured: "); DC(St->Count); S(" registers"); NL();
+    return EFI_SUCCESS;
+}
+
+// Native AUX write of len (1..16) DPCD bytes.
+static EFI_STATUS DpcdWrite(DEV* D, UINT32 addr, const UINT8* in, UINTN len)
+{
+    for (UINTN defer = 0; defer < 7; defer++) {
+        UINT8 tx[20];
+        UINT8 rx[20];
+        UINTN rn = 1;
+        tx[0] = (UINT8)(0x80 | ((addr >> 16) & 0xF));
+        tx[1] = (UINT8)(addr >> 8);
+        tx[2] = (UINT8)addr;
+        tx[3] = (UINT8)(len - 1);
+        for (UINTN i = 0; i < len; i++) tx[4 + i] = in[i];
+        EFI_STATUS St = AuxXfer(D, tx, 4 + len, rx, &rn);
+        if (EFI_ERROR(St)) return St;
+        UINT8 code = (UINT8)(rx[0] >> 4);
+        if (code == 0x2) { D->BS->Stall(400); continue; }     // AUX_DEFER
+        return code == 0 ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+    }
+    return EFI_TIMEOUT;
+}
+static EFI_STATUS DpcdWrite1(DEV* D, UINT32 addr, UINT8 v) { return DpcdWrite(D, addr, &v, 1); }
+
+// DDI buffer translation index for (voltage swing, pre-emphasis), as i915 translate_signal_level
+// for the 10-entry SKL/KBL/CFL eDP table. -1 = combination not allowed.
+static int LevelIndex(UINT8 vs, UINT8 pe)
+{
+    static const signed char t[4][4] = { {0, 1, 2, 3}, {4, 5, 6, -1}, {7, 8, -1, -1}, {9, -1, -1, -1} };
+    return t[vs & 3][pe & 3];
+}
+static UINT8 PeMax(UINT8 vs) { return (UINT8)(3 - (vs & 3)); }
+
+// Lane-set byte for DPCD 0x103..: swing, pre-emphasis and the "max reached" flags.
+static UINT8 LaneSet(UINT8 vs, UINT8 pe)
+{
+    UINT8 b = (UINT8)(vs | (pe << 3));
+    if (vs >= 3) b |= 0x04;
+    if (pe >= PeMax(vs)) b |= 0x20;
+    return b;
+}
+
+// Largest requested swing / pre-emphasis over the active lanes, then clamped to a legal pair.
+static VOID NextLevel(const UINT8* adj, UINTN lanes, UINT8* vs, UINT8* pe)
+{
+    UINT8 v = 0, e = 0;
+    for (UINTN i = 0; i < lanes; i++) {
+        UINT8 b = (UINT8)(adj[i / 2] >> ((i & 1) * 4));
+        if ((b & 3) > v) v = b & 3;
+        if (((b >> 2) & 3) > e) e = (b >> 2) & 3;
+    }
+    if (e > PeMax(v)) e = PeMax(v);
+    *vs = v; *pe = e;
+}
+
+// Lane status helpers (DPCD 0x202..0x205): per lane CR_DONE bit0, EQ_DONE bit1, SYMBOL_LOCK bit2.
+static BOOLEAN LanesOk(const UINT8* st, UINTN lanes, UINT8 mask)
+{
+    for (UINTN i = 0; i < lanes; i++) {
+        UINT8 b = (UINT8)(st[i / 2] >> ((i & 1) * 4));
+        if ((b & mask) != mask) return FALSE;
+    }
+    return TRUE;
+}
+
+// DP link training, i915 intel_dp_link_training_clock_recovery() / _channel_equalization().
+static EFI_STATUS TrainLink(DEV* D, UINT8 rate, UINTN lanes, BOOLEAN enh, BOOLEAN ssc,
+                            UINT32 bufctl, _INT_Rep* R)
+{
+    UINT8 sink[16];
+    UINT8 st[6];
+    UINT8 vs = 0, pe = 0;
+    BOOLEAN tps3 = FALSE, enhCap = FALSE;
+    UINT32 tpEnh = enh ? TP_ENHANCED : 0;
+
+    if (!EFI_ERROR(DpcdRead(D, 0x000, sink, 16))) {
+        tps3 = (sink[2] & 0x40) != 0;
+        enhCap = (sink[2] & 0x80) != 0;
+    }
+    if (!enhCap) { enh = FALSE; tpEnh = 0; }
+    UINTN crInterval = 100, eqInterval = 400;
+    if (sink[0x0E] & 0x7F) { crInterval = eqInterval = (UINTN)(sink[0x0E] & 0x7F) * 4000; }
+
+    EFI_STATUS e = DpcdWrite1(D, 0x600, 0x01);                       // SET_POWER: D0
+    if (EFI_ERROR(e)) { S("Link training: panel does not answer AUX writes"); NL(); return e; }
+    DpcdWrite1(D, 0x100, rate);                                      // LINK_BW_SET
+    DpcdWrite1(D, 0x101, (UINT8)(lanes | (enh ? 0x80 : 0)));         // LANE_COUNT_SET
+    DpcdWrite1(D, 0x107, ssc ? 0x10 : 0x00);                         // DOWNSPREAD_CTRL
+    DpcdWrite1(D, 0x108, 0x01);                                      // 8b/10b
+
+    bufctl &= ~(DDI_BUF_ENABLE | DDI_BUF_TRANS_MASK);
+    Wr(D, DP_TP_CTL_A, TP_ENABLE | tpEnh | TP_PAT1);
+    Wr(D, DDI_BUF_CTL_A, bufctl | DDI_BUF_TRANS_SEL(LevelIndex(0, 0)) | DDI_BUF_ENABLE);
+    D->BS->Stall(600);
+    for (UINTN i = 0; i < 50 && (Rd(D, DDI_BUF_CTL_A) & DDI_BUF_IDLE); i++) D->BS->Stall(50);
+
+    // ---- clock recovery ----
+    BOOLEAN cr = FALSE;
+    UINTN sameVs = 0;
+    UINT8 prevVs = 0xFF;
+    for (UINTN tries = 0; tries < 10 && !cr; tries++) {
+        UINT8 cmd[5] = { 0x21, 0, 0, 0, 0 };                          // TPS1, scrambling disabled
+        for (UINTN i = 0; i < lanes; i++) cmd[1 + i] = LaneSet(vs, pe);
+        Wr(D, DDI_BUF_CTL_A, bufctl | DDI_BUF_TRANS_SEL(LevelIndex(vs, pe)) | DDI_BUF_ENABLE);
+        e = (tries == 0) ? DpcdWrite(D, 0x102, cmd, 5) : DpcdWrite(D, 0x103, cmd + 1, 4);
+        if (EFI_ERROR(e)) return e;
+        D->BS->Stall(crInterval);
+        e = DpcdRead(D, 0x202, st, 6);
+        if (EFI_ERROR(e)) return e;
+        if (LanesOk(st, lanes, 0x01)) { cr = TRUE; break; }
+        UINT8 nv, ne;
+        NextLevel(st + 4, lanes, &nv, &ne);
+        if (nv == prevVs) { if (++sameVs >= 5) break; } else { sameVs = 0; prevVs = nv; }
+        vs = nv; pe = ne;
+    }
+    if (!cr) { S("Link training: clock recovery failed"); NL(); return EFI_DEVICE_ERROR; }
+
+    // ---- channel equalization ----
+    BOOLEAN eq = FALSE;
+    BOOLEAN useTps3 = tps3 && rate >= 0x14;
+    Wr(D, DP_TP_CTL_A, TP_ENABLE | tpEnh | (useTps3 ? TP_PAT3 : TP_PAT2));
+    for (UINTN tries = 0; tries < 6 && !eq; tries++) {
+        UINT8 cmd[5] = { (UINT8)(useTps3 ? 0x23 : 0x22), 0, 0, 0, 0 };
+        for (UINTN i = 0; i < lanes; i++) cmd[1 + i] = LaneSet(vs, pe);
+        Wr(D, DDI_BUF_CTL_A, bufctl | DDI_BUF_TRANS_SEL(LevelIndex(vs, pe)) | DDI_BUF_ENABLE);
+        e = (tries == 0) ? DpcdWrite(D, 0x102, cmd, 5) : DpcdWrite(D, 0x103, cmd + 1, 4);
+        if (EFI_ERROR(e)) return e;
+        D->BS->Stall(eqInterval);
+        e = DpcdRead(D, 0x202, st, 6);
+        if (EFI_ERROR(e)) return e;
+        if (!LanesOk(st, lanes, 0x01)) { S("Link training: clock recovery lost during EQ"); NL(); return EFI_DEVICE_ERROR; }
+        if (LanesOk(st, lanes, 0x07) && (st[2] & 0x01)) { eq = TRUE; break; }
+        NextLevel(st + 4, lanes, &vs, &pe);
+    }
+    if (!eq) { S("Link training: equalization failed"); NL(); return EFI_DEVICE_ERROR; }
+    S("Link trained: rate=0x"); HX(rate, 2); S(" lanes="); DC(lanes);
+    S(" swing="); DC(vs); S(" preemph="); DC(pe); NL();
+    return EFI_SUCCESS;
+}
+
+static VOID DispFail(DEV* D)
+{
+    Wr(D, DDI_BUF_CTL_A, Rd(D, DDI_BUF_CTL_A) & ~DDI_BUF_ENABLE);
+    Wr(D, DP_TP_CTL_A, 0);
+}
+
+EFI_STATUS _INT_DispReplay(EFI_BOOT_SERVICES* BS, EFI_HANDLE Image, const _INT_DispState* St, _INT_Rep* R)
+{
+    EFI_PCI_IO_PROTOCOL* p = NULL;
+    UINT32 c1, c2, cbuf, ctp, cht, cvt, cfn, cpc;
+    EFI_STATUS st = PpsIgpu(BS, Image, &p, R);
+    if (EFI_ERROR(st)) return st;
+    if (!DispGet(St, DPLL_CTRL1, &c1) || !DispGet(St, DPLL_CTRL2, &c2) ||
+        !DispGet(St, DDI_BUF_CTL_A, &cbuf) || !DispGet(St, DP_TP_CTL_A, &ctp) ||
+        !DispGet(St, TRANS_HTOTAL_EDP, &cht) || !DispGet(St, TRANS_VTOTAL_EDP, &cvt) ||
+        !DispGet(St, TRANS_DDI_FUNC_EDP, &cfn) || !DispGet(St, PIPECONF_EDP, &cpc))
+        return EFI_NOT_FOUND;
+    DEV d = { BS, p };
+
+    UINT32 ps = Rd(&d, PP_STATUS), pw = Rd(&d, PWR_WELL_CTL2);
+    if (ps == 0xFFFFFFFFu || pw == 0xFFFFFFFFu) return EFI_NOT_READY;
+    if ((ps & (PP_ON | PP_SEQUENCE_MASK | PP_STATE_MASK)) != (PP_ON | PP_STATE_ON_IDLE)) {
+        S("Display replay: panel is not powered, skipped"); NL(); return EFI_NOT_READY;
+    }
+    if ((pw & (PW_PW1_STATE | PW_DDI_AE_STATE)) != (PW_PW1_STATE | PW_DDI_AE_STATE)) {
+        S("Display replay: power wells are down, skipped"); NL(); return EFI_NOT_READY;
+    }
+    if (Rd(&d, DDI_BUF_CTL_A) & DDI_BUF_ENABLE) {
+        S("Display replay: DDI A already enabled, nothing to do"); NL(); return EFI_SUCCESS;
+    }
+
+    // 1. DPLL0 link-rate divider + DDI A clock routing, only the DPLL0 / port A fields.
+    UINT32 cur = Rd(&d, DPLL_CTRL1);
+    UINT32 n1 = (cur & ~0x3Fu) | (c1 & 0x3Fu);
+    if (n1 != cur) Wr(&d, DPLL_CTRL1, n1);
+    cur = Rd(&d, DPLL_CTRL2);
+    UINT32 m2 = 0x7u | (1u << 15);
+    UINT32 n2 = (cur & ~m2) | (c2 & m2);
+    if (n2 != cur) Wr(&d, DPLL_CTRL2, n2);
+    BOOLEAN lock = FALSE;
+    for (UINTN i = 0; i < 100; i++) { if (Rd(&d, DPLL_STATUS) & 1u) { lock = TRUE; break; } BS->Stall(50); }
+    if (!lock) { S("Display replay: DPLL0 not locked"); NL(); return EFI_DEVICE_ERROR; }
+
+    // 2. DDI buffer translation table (voltage swing / pre-emphasis levels the firmware used).
+    for (UINT32 i = 0; i < St->Count; i++)
+        if (St->R[i].Off >= DDI_BUF_TRANS_A && St->R[i].Off < DDI_BUF_TRANS_A + 0x50)
+            Wr(&d, St->R[i].Off, St->R[i].Val);
+
+    // 3. Link parameters exactly as the firmware trained them.
+    static const UINT8 rates[6] = { 0x14, 0x0A, 0x06, 0x0C, 0x08, 0x10 };   // DPLL_CTRL1 rate field -> DPCD
+    UINT32 rf = (c1 >> 1) & 7;
+    if (rf > 5) return EFI_UNSUPPORTED;
+    UINTN lanes = ((cbuf >> 1) & 7) + 1;
+    if (lanes != 1 && lanes != 2 && lanes != 4) return EFI_UNSUPPORTED;
+    st = TrainLink(&d, rates[rf], lanes, (ctp & TP_ENHANCED) != 0, (c1 & (1u << 4)) != 0, cbuf, R);
+    if (EFI_ERROR(st)) { DispFail(&d); return st; }
+
+    // 4. Transcoder: timing, M/N, MSA, pipe size (no scaler / plane: the pipe is native size).
+    for (UINT32 i = 0; i < St->Count; i++) {
+        UINT32 o = St->R[i].Off;
+        if ((o >= TRANS_HTOTAL_EDP && o <= 0x6F044) || o == TRANS_MSA_MISC_EDP) Wr(&d, o, St->R[i].Val);
+    }
+    UINT32 hact = (cht & 0xFFFFu), vact = (cvt & 0xFFFFu);                 // active - 1
+    Wr(&d, PIPESRC_A, (hact << 16) | vact);
+    Wr(&d, PIPE_BOTTOM_COLOR_A, 0xC00003FFu);                              // plain blue background
+
+    // 5. Link idle, sink out of training, then transcoder function + pipe on.
+    Wr(&d, DP_TP_CTL_A, TP_ENABLE | (ctp & TP_ENHANCED) | TP_IDLE);
+    DpcdWrite1(&d, 0x102, 0x00);
+    BS->Stall(100);
+    Wr(&d, TRANS_DDI_FUNC_EDP, cfn);
+    Wr(&d, PIPECONF_EDP, cpc);
+    BOOLEAN pipe = FALSE;
+    for (UINTN i = 0; i < 200; i++) { if (Rd(&d, PIPECONF_EDP) & (1u << 30)) { pipe = TRUE; break; } BS->Stall(100); }
+    for (UINTN i = 0; i < 50; i++) { if (Rd(&d, DP_TP_STATUS_A) & TP_STATUS_IDLE_DONE) break; BS->Stall(100); }
+    Wr(&d, DP_TP_CTL_A, TP_ENABLE | (ctp & TP_ENHANCED) | TP_NORMAL);
+    if (!pipe) { S("Display replay: pipe did not start"); NL(); return EFI_DEVICE_ERROR; }
+
+    // 6. Backlight (PCH PWM) as the firmware had it, then the panel's backlight enable.
+    UINT32 f, du, b1;
+    if (DispGet(St, BLC_PWM_FREQ, &f) && DispGet(St, BLC_PWM_DUTY, &du) && DispGet(St, BLC_PWM_CTL1, &b1)) {
+        Wr(&d, BLC_PWM_FREQ, f);
+        Wr(&d, BLC_PWM_DUTY, du);
+        Wr(&d, BLC_PWM_CTL1, b1);
+    }
+    UINT32 pc = Rd(&d, PP_CONTROL);
+    Wr(&d, PP_CONTROL, ((pc & 0xFFFFu) | EDP_BLC_ENABLE) | PP_UNLOCK);
+    S("Display replay: eDP pipeline up (pipe A, eDP transcoder, link trained, backlight on)"); NL();
+    return EFI_SUCCESS;
+}

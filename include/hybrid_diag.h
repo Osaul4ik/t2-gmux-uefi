@@ -192,7 +192,13 @@ static void GmuxDeepPci(EFI_BOOT_SERVICES *bs,EFI_HANDLE image) {
             0x7F008, // PIPECONF_EDP (eDP transcoder)
             0x6F400, // TRANS_DDI_FUNC_CTL_EDP
             0x70180, // PLANE_CTL_1_A
-            0x7019C  // PLANE_SURF_1_A
+            0x7019C, // PLANE_SURF_1_A
+            0x6F000, // TRANS_HTOTAL_EDP
+            0x6F00C, // TRANS_VTOTAL_EDP
+            0x6F040, // TRANS_LINK_M1_EDP
+            0x6F410, // TRANS_MSA_MISC_EDP
+            0x70034, // PIPE_BOTTOM_COLOR_A
+            0xC8258  // BLC_PWM duty
         };
         static const char *names[]={
             "PWR_WELL_CTL1=","PWR_WELL_CTL2=","DC_STATE_EN=","DBUF_CTL=",
@@ -203,7 +209,8 @@ static void GmuxDeepPci(EFI_BOOT_SERVICES *bs,EFI_HANDLE image) {
             "CDCLK_CTL=","LCPLL1_CTL=","DPLL_CTRL1=","DPLL_CTRL2=","DPLL_STATUS=",
             "BLC_PWM_PCH_CTL1=","BLC_PWM_PCH_CTL2=",
             "HTOTAL_A=","PIPESRC_A=","PIPE_DSL_A=","PIPECONF_A=","PIPECONF_EDP=",
-            "TRANS_DDI_FUNC_CTL_EDP=","PLANE_CTL_1_A=","PLANE_SURF_1_A="
+            "TRANS_DDI_FUNC_CTL_EDP=","PLANE_CTL_1_A=","PLANE_SURF_1_A=",
+            "TRANS_HTOTAL_EDP=","TRANS_VTOTAL_EDP=","TRANS_LINK_M1_EDP=","TRANS_MSA_MISC_EDP=","PIPE_BOTTOM_COLOR_A=","BLC_PWM_DUTY="
         };
         for(UINTN j=0;j<sizeof(offsets)/sizeof(offsets[0]);j++) {
             UINT32 v=0xFFFFFFFFu;

@@ -71,6 +71,25 @@ EFI_STATUS _INT_EdpRestorePps(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 // this hands the iGPU to the OS driver in the state the firmware left it in.
 EFI_STATUS _INT_EdpReleaseWells(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_Rep* R);
 
+// ---- Firmware display state: capture on a boot where the firmware lit the panel, replay on a
+// boot where it did not (external display primary). ----
+#define _INT_DISP_MAX 64
+typedef struct { UINT32 Off; UINT32 Val; } _INT_DispReg;
+typedef struct { UINT32 Count; _INT_DispReg R[_INT_DISP_MAX]; } _INT_DispState;
+
+// Read the registers that describe the eDP pipeline the firmware brought up (DPLL0 / DDI-A clock,
+// DDI buffer translation, eDP transcoder timing + M/N, DDI function, pipe, backlight PWM).
+// EFI_NOT_READY unless the pipeline really is lit (DDI A, DP_TP, eDP transcoder, pipe enabled).
+EFI_STATUS _INT_DispCapture(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                            _INT_DispState* St, _INT_Rep* R);
+// Bring the internal panel up from reset the way i915 does, using the captured values for
+// everything the firmware chose: DPLL0 + DDI clock, buffer translation, a real DP link training
+// over AUX, transcoder timing, eDP transcoder + pipe, backlight. No plane: the pipe shows its
+// background colour (blue), which is the visible proof that the panel is lit. Requires the
+// panel powered (PanelPrepare) and the DDI_A_E well up. EFI_SUCCESS when already lit.
+EFI_STATUS _INT_DispReplay(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
+                           const _INT_DispState* St, _INT_Rep* R);
+
 // Built-in VBT (lib/vbt_base.c) -> OpRegion mailbox 4.
 extern const UINT8 _INT_VbtBase[];
 extern const UINTN _INT_VbtBaseSize;

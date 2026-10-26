@@ -292,6 +292,7 @@ GmuxSetDiscretePower(EFI_BOOT_SERVICES *BS, BOOLEAN PowerOn, BOOLEAN *PowerEvent
 }
 
 #include "include/panel_cache.h"
+#include "include/disp_cache.h"
 
 // Bisect switches for the external-display hybrid boot: an empty file in the ESP root.
 //   \gmux_x_nopanel.flag  : leave the internal panel exactly as the firmware left it
@@ -302,7 +303,8 @@ static BOOLEAN EspFlagPresent(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, CHAR16 *N
     VOID *data = NULL; UINTN size = 0;
     EFI_STATUS st = _INT_ReadEspFile(BS, Image, Name, &data, &size);
     if (!EFI_ERROR(st) && data) BS->FreePool(data);
-    return !EFI_ERROR(st);
+    // _INT_ReadEspFile refuses an EMPTY file (EFI_BAD_BUFFER_SIZE): that still means "present".
+    return !EFI_ERROR(st) || st == EFI_BAD_BUFFER_SIZE;
 }
 #include "include/hybrid_diag.h"
 
@@ -1798,6 +1800,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             if (FwPanelOn) {
                 EFI_STATUS PpsRd = _INT_EdpReadPps(BS, ImageHandle, &LivePps, &IR);
                 if (EFI_ERROR(PpsRd)) LivePps.Valid = FALSE;
+                // The whole lit eDP pipeline, for the boot with an external display.
+                _INT_DispState DispSt;
+                EFI_STATUS DispCapSt = _INT_DispCapture(BS, ImageHandle, &DispSt, &IR);
+                EFI_STATUS DispStoreSt = EFI_NOT_READY;
+                if (!EFI_ERROR(DispCapSt)) DispStoreSt = DispCacheStore(BS, ImageHandle, &DispSt);
+                if (HybridDiagActive) {
+                    HybridDiagStatus("display state capture=", DispCapSt);
+                    HybridDiagStatus("display state store=", DispStoreSt);   // 0 written, ALREADY_STARTED unchanged
+                }
             }
             if (Caps.Valid && LiveEdid && !UsedCachedDpcd) {
                 // Keep the previously cached timing when this boot could not read it.
@@ -1834,9 +1845,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             // request PPS panel ON (not DDI training). Do not alter already-on boot.
             BOOLEAN XNoPanel   = EspFlagPresent(BS, ImageHandle, L"\\gmux_x_nopanel.flag");
             BOOLEAN XRelWells  = EspFlagPresent(BS, ImageHandle, L"\\gmux_x_relwells.flag");
+            BOOLEAN XReplay    = EspFlagPresent(BS, ImageHandle, L"\\gmux_x_replay.flag");
+            if (XReplay) XRelWells = FALSE;   // the lit pipeline needs the wells the loader requested
             if (HybridDiagActive) {
                 HybridDiagValue("experiment nopanel=", XNoPanel, 1);
                 HybridDiagValue("experiment relwells=", XRelWells, 1);
+                HybridDiagValue("experiment replay=", XReplay, 1);
             }
             if (!EFI_ERROR(PanelStateSt) && !PanelWasPowered && !XNoPanel) {
                 // i915 programs rawclk + PP_DIVISOR + delays before the first power-up; the
@@ -1867,6 +1881,22 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 Skip4Lanes = TRUE;
             else
                 LS = _INT_IgpuForceDdiA4Lanes(BS, ImageHandle, &IR);
+            // Experimental: light the panel from reset with the firmware's own display state.
+            if (XReplay && !EFI_ERROR(PanelStateSt) && !PanelWasPowered && !XNoPanel) {
+                _INT_DispState DispSt;
+                EFI_STATUS DispLoadSt = DispCacheLoad(BS, ImageHandle, &DispSt);
+                EFI_STATUS ReplaySt = EFI_NOT_FOUND;
+                if (!EFI_ERROR(DispLoadSt))
+                    ReplaySt = _INT_DispReplay(BS, ImageHandle, &DispSt, &IR);
+                else {
+                    _INT_RepStr(&IR, (const CHAR8 *)"Display replay: no saved display state (boot once without an external display)");
+                    _INT_RepNl(&IR);
+                }
+                if (HybridDiagActive) {
+                    HybridDiagStatus("display state load=", DispLoadSt);
+                    HybridDiagStatus("display replay=", ReplaySt);
+                }
+            }
             // ACPI patch (brightness via gmux) from the ESP root: mode 4 = SSDT_IGPU.aml,
             // mode 5 = SSDT_IGPU_BRT.aml (brightness + resume re-route).
             AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, AcpiFile, &IR);
