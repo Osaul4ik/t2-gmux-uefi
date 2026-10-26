@@ -14,11 +14,10 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  IMAGE_NAME: apple_set_os_loader
 
 jobs:
   build:
-    name: Docker build bootx64.efi
+    name: Build bootx64.efi
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -28,16 +27,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Docker image
-        run: docker build -t "${IMAGE_NAME}" .
+      # No container registry involved: the pull of the base image from public.ecr.aws failed with
+      # 429 "Data limit exceeded" (anonymous pulls are rate limited). The toolchain is the same
+      # apt packages the Dockerfile installs, taken from the runner's own mirror.
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential gnu-efi binutils file
 
       - name: Compile bootx64.efi
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/build" \
-            -w /build \
-            "${IMAGE_NAME}" \
-            make clean all
+        run: make clean all
 
       - name: Verify artifact
         run: |
