@@ -1846,6 +1846,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             BOOLEAN XNoPanel   = EspFlagPresent(BS, ImageHandle, L"\\gmux_x_nopanel.flag");
             BOOLEAN XRelWells  = EspFlagPresent(BS, ImageHandle, L"\\gmux_x_relwells.flag");
             BOOLEAN XReplay    = EspFlagPresent(BS, ImageHandle, L"\\gmux_x_replay.flag");
+            BOOLEAN ReplayOk   = FALSE;
             if (XReplay) XRelWells = FALSE;   // the lit pipeline needs the wells the loader requested
             if (HybridDiagActive) {
                 HybridDiagValue("experiment nopanel=", XNoPanel, 1);
@@ -1892,6 +1893,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                     _INT_RepStr(&IR, (const CHAR8 *)"Display replay: no saved display state (boot once without an external display)");
                     _INT_RepNl(&IR);
                 }
+                ReplayOk = (!EFI_ERROR(DispLoadSt) && !EFI_ERROR(ReplaySt));
                 if (HybridDiagActive) {
                     HybridDiagStatus("display state load=", DispLoadSt);
                     HybridDiagStatus("display replay=", ReplaySt);
@@ -1900,7 +1902,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             // ACPI patch (brightness via gmux) from the ESP root: mode 4 = SSDT_IGPU.aml,
             // mode 5 = SSDT_IGPU_BRT.aml (brightness + resume re-route).
             AS = _INT_AcpiApplyPatch(BS, SystemTable, ImageHandle, AcpiFile, &IR);
-            if (XRelWells) {
+            if (ReplayOk) {
+                // The loader lit the pipeline: hand the wells it requested to the BIOS register, like a
+                // firmware-lit boot, instead of leaving driver requests in PWR_WELL_CTL2.
+                EFI_STATUS HoSt = _INT_EdpHandoffWells(BS, ImageHandle, &IR);
+                if (HybridDiagActive) HybridDiagStatus("power wells handoff to BIOS=", HoSt);
+            } else if (XRelWells) {
                 EFI_STATUS RelSt = _INT_EdpReleaseWells(BS, ImageHandle, &IR);
                 if (HybridDiagActive) HybridDiagStatus("power wells released=", RelSt);
             }

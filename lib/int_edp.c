@@ -9,6 +9,7 @@
 // Gen 9 / 9.5 (SKL..CFL) display registers, DDI A / AUX-A, as in Linux i915.
 #define DP_AUX_CH_CTL_A     0x64010
 #define DP_AUX_CH_DATA_A(i) (0x64014 + 4 * (i))
+#define PWR_WELL_CTL1       0x45400
 #define PWR_WELL_CTL2       0x45404
 #define PP_STATUS           0xC7200
 #define PP_CONTROL          0xC7204
@@ -470,6 +471,41 @@ EFI_STATUS _INT_EdpReleaseWells(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,_INT_Rep 
     return EFI_SUCCESS;
 }
 
+// The replay lights the pipeline and needs PW1 + DDI_A_E to stay up. Dropping the loader's
+// driver-register requests (EdpReleaseWells) would cut them under the lit pipe, and leaving them
+// puts requests in PWR_WELL_CTL2, a register the firmware never uses and the OS driver owns.
+// A firmware-lit boot holds the same wells through the BIOS register (PWR_WELL_CTL1), so move the
+// requests there first and drop the driver ones only once the BIOS ones read back and the wells
+// are still up. On any doubt the driver requests stay (nothing is ever cut).
+EFI_STATUS _INT_EdpHandoffWells(EFI_BOOT_SERVICES *BS,EFI_HANDLE Image,_INT_Rep *R)
+{
+    EFI_PCI_IO_PROTOCOL *p=NULL;
+    EFI_STATUS st=PpsIgpu(BS,Image,&p,R);
+    if(EFI_ERROR(st))return st;
+    DEV d={BS,p};
+    UINT32 bios=Rd(&d,PWR_WELL_CTL1),drv=Rd(&d,PWR_WELL_CTL2);
+    if(bios==0xFFFFFFFFu||drv==0xFFFFFFFFu)return EFI_NOT_READY;
+    UINT32 req=PW_PW1_REQ|PW_DDI_AE_REQ,up=PW_PW1_STATE|PW_DDI_AE_STATE;
+    if(!(drv & req))return EFI_SUCCESS;                    // the loader holds nothing
+    if((bios & req)!=req)Wr(&d,PWR_WELL_CTL1,bios|req);
+    bios=Rd(&d,PWR_WELL_CTL1);
+    if((bios & req)!=req){
+        S("Power wells: BIOS request did not stick, PWR_WELL_CTL1=0x");HX(bios,8);S(", driver requests kept");NL();
+        return EFI_DEVICE_ERROR;
+    }
+    Wr(&d,PWR_WELL_CTL2,drv & ~req);
+    BS->Stall(2000);
+    drv=Rd(&d,PWR_WELL_CTL2);
+    if((drv & up)!=up){
+        Wr(&d,PWR_WELL_CTL2,drv|req);                      // roll back, the pipeline needs them
+        S("Power wells: wells dropped after the handoff, driver requests restored");NL();
+        return EFI_DEVICE_ERROR;
+    }
+    S("Power wells: held by the BIOS register now, PWR_WELL_CTL1=0x");HX(Rd(&d,PWR_WELL_CTL1),8);
+    S(" PWR_WELL_CTL2=0x");HX(drv,8);NL();
+    return EFI_SUCCESS;
+}
+
 // =====================================================================================
 // Display state capture / replay (see int_edp.h)
 // =====================================================================================
@@ -724,7 +760,7 @@ EFI_STATUS _INT_DispReplay(EFI_BOOT_SERVICES* BS, EFI_HANDLE Image, const _INT_D
     UINT32 n1 = (cur & ~0x3Fu) | (c1 & 0x3Fu);
     if (n1 != cur) Wr(&d, DPLL_CTRL1, n1);
     cur = Rd(&d, DPLL_CTRL2);
-    UINT32 m2 = 0x7u | (1u << 15);
+    UINT32 m2 = 0xFu | (1u << 15);                 // DDI A: override [0], clock select [3:1], clock off [15]
     UINT32 n2 = (cur & ~m2) | (c2 & m2);
     if (n2 != cur) Wr(&d, DPLL_CTRL2, n2);
     BOOLEAN lock = FALSE;

@@ -70,6 +70,11 @@ EFI_STATUS _INT_EdpRestorePps(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle,
 // AUX and panel work. The firmware boots with them clear (the BIOS register holds the wells), so
 // this hands the iGPU to the OS driver in the state the firmware left it in.
 EFI_STATUS _INT_EdpReleaseWells(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_Rep* R);
+// Same goal for a boot where the loader lit the pipeline itself (display replay): the wells must
+// stay up, so the requests move from PWR_WELL_CTL2 (driver) to PWR_WELL_CTL1 (BIOS), the register a
+// firmware-lit boot holds them in, and the driver ones are dropped only after the BIOS ones read
+// back and the wells are still up. Otherwise nothing is changed.
+EFI_STATUS _INT_EdpHandoffWells(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, _INT_Rep* R);
 
 // ---- Firmware display state: capture on a boot where the firmware lit the panel, replay on a
 // boot where it did not (external display primary). ----
