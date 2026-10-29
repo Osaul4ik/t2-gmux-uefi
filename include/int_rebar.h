@@ -53,6 +53,7 @@ typedef struct {
     UINT32  Gpu;            // bus:dev.fn of the Radeon (bus<<8 | dev<<3 | fn)
     UINT32  WinFb;          // 1 = the root bridge reported no window above 4 GB, the built-in fallback window was used
     UINT32  SizeFix;        // prefetchable BARs whose real (probed) size differed from the bus driver's number (shown on screen)
+    UINT32  CapMaxExp;      // largest BAR0 size the card supports, 2^(20+n) (diagnostics)
 } _INT_RebarResult;
 
 // Resize BAR0 of the Radeon to the largest size that is supported and fits, re-place its prefetchable BARs
