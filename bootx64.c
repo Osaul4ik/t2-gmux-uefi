@@ -436,7 +436,7 @@ static CHAR16 *MenuName[MODE_COUNT] = {
 //     4            <- default mode (1, 4 or 5): the one with the x mark, started by the auto-boot timer
 //     FSB=1        <- FakeSecureBoot on (1) / off (0); no such line = off
 //     REBAR=1      <- Resizable BAR on (1) / off (0); no such line = off
-//     REBARMB=4096 <- largest BAR0 size in MB (256, 512, 1024, 2048, 4096); no such line = 4096
+//     REBARMB=8192 <- largest BAR0 size in MB (256, 512, 1024, 2048, 4096, 8192); no such line = 8192
 #define DEFAULT_FILE    L"\\t2gmux_default.txt"
 static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'4', L'5' };
 
@@ -449,9 +449,9 @@ static const CHAR16 ModeLetter[MODE_COUNT] = { L'1', L'2', L'4', L'5' };
 #define REBARMB_KEY     "REBARMB="
 
 // BAR sizes the Advanced menu offers. BAR sizes are powers of two, so the 256 MB step doubles each time.
-static const UINT32 RebarSizes[] = { 256, 512, 1024, 2048, 4096 };
+static const UINT32 RebarSizes[] = { 256, 512, 1024, 2048, 4096, 8192 };
 #define REBAR_SIZES     (sizeof(RebarSizes) / sizeof(RebarSizes[0]))
-static UINT32 gRebarMb = 4096;              // chosen size (REBARMB= line), used by the Resizable BAR step
+static UINT32 gRebarMb = 8192;              // chosen size (REBARMB= line), used by the Resizable BAR step
 
 // TRUE if Data holds "<Key>1" (Key = "FSB=" / "REBAR=") anywhere after the mode letter.
 static BOOLEAN
@@ -477,7 +477,7 @@ DefaultLoad(EFI_BOOT_SERVICES *BS, EFI_HANDLE Image, BOOLEAN *Fsb, BOOLEAN *Reba
 
     *Fsb = FALSE;                                  // no file / no FSB= line: off
     *Rebar = FALSE;                                // no file / no REBAR= line: off
-    gRebarMb = 4096;                               // no file / no REBARMB= line / a size that is not in the list: 4096
+    gRebarMb = 8192;                               // no file / no REBARMB= line / a size that is not in the list: 8192
 
     if (!EFI_ERROR(_INT_ReadEspFile(BS, Image, DEFAULT_FILE, &Data, &Size)) && Data != NULL) {
         for (UINTN i = 0; i < Size; i++) {
@@ -947,7 +947,7 @@ static CHAR16 *AdvText[ADV_COUNT] = {
     L"Back",
     L"FakeSecureBoot",                  // drawn as "FakeSecureBoot: True/False"
     L"Resizable BAR",                   // drawn as "Resizable BAR: On/Off"
-    L"BAR0 size",                       // drawn as "  BAR0 size: 4096 MB", listed only while Resizable BAR is On
+    L"BAR0 size",                       // drawn as "  BAR0 size: 8192 MB", listed only while Resizable BAR is On
 };
 
 // Row of item i. Separators: after the head (the FakeSecureBoot / Resizable BAR toggles, Head = 1 or 2)
@@ -1761,6 +1761,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             LOG(&gs, PR_REBAR, L"Resizable BAR: PCI query failed, nothing changed");
             break;
         }
+        if ((Rb.Code == _INT_REBAR_OK || Rb.Code == _INT_REBAR_ALREADY || Rb.Code == _INT_REBAR_NO_FIT) &&
+            Rb.NewExp < Rb.CapMaxExp && (1u << Rb.NewExp) < gRebarMb)
+            LOG(&gs, PR_REBAR, L"Resizable BAR: the card supports up to %d MB, window %lX-%lX%s",
+                (UINTN)(1u << Rb.CapMaxExp), Rb.WinLo, Rb.WinHi, Rb.WinFb ? L" (fallback)" : L"");
     }
 
     // ---- FakeSecureBoot (any mode, including 1): start the hook driver last, right before Windows ----
