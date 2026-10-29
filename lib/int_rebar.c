@@ -27,7 +27,7 @@
 #define BR_PREF_LIMIT_U     0x2C
 
 #define EXTCAP_REBAR        0x0015
-#define REBAR_MAX_EXP       12              // 4 GB (2^12 MB): this Mac's Radeon has 4 GB of VRAM
+#define REBAR_MAX_EXP       13              // 8 GB (2^13 MB): Radeon Pro 5600M has 8 GB of HBM2 (5300M / 5500M: 4 GB)
 
 // Fallback when the root bridge reports no MMIO window above 4 GB (Apple's EFI does not hand one out through
 // EFI_PCI_ROOT_BRIDGE_IO.Configuration()). These are the M64B / M64L values the firmware leaves in the ACPI
@@ -224,15 +224,15 @@ static BOOLEAN BridgePref(RB_DEV* b, UINT64* Base, UINT64* Limit)
     return (*Limit >= *Base && *Base != 0) ? TRUE : FALSE;
 }
 
-// The largest MMIO window above 4 GB the root bridge of the Radeon decodes. A separate prefetchable window
-// (SpecificFlag 0x06) wins over a plain one. Descriptors are ACPI address space descriptors: QWORD 0x8A
+// The largest MMIO window above 4 GB the root bridge of the Radeon decodes (prefetchable or not: a small
+// prefetchable aperture must not hide a bigger plain one). Descriptors are ACPI address space descriptors: QWORD 0x8A
 // (memory ranges, normally the bus range too), DWORD 0x87, WORD 0x88 (bus range of some firmware).
 static BOOLEAN RootWindow(EFI_BOOT_SERVICES* BS, UINTN Seg, UINTN Bus, UINT64* Lo, UINT64* Hi)
 {
     EFI_GUID guid = EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_GUID;
     EFI_HANDLE* H = NULL;
     UINTN Cnt = 0;
-    UINT64 PLo = 0, PHi = 0, ALo = 0, AHi = 0;
+    UINT64 ALo = 0, AHi = 0;
 
     if (EFI_ERROR(BS->LocateHandleBuffer(ByProtocol, &guid, NULL, &Cnt, &H)))
         return FALSE;
@@ -267,11 +267,7 @@ static BOOLEAN RootWindow(EFI_BOOT_SERVICES* BS, UINTN Seg, UINTN Bus, UINT64* L
                     continue;
                 if (Min < GB4)
                     Min = GB4;
-                if (p[5] & 0x06) {
-                    if (Max - Min > PHi - PLo) {
-                        PLo = Min; PHi = Max;
-                    }
-                } else if (Max - Min > AHi - ALo) {
+                if (Max - Min > AHi - ALo) {                // the biggest one: the root bridge decodes both kinds
                     ALo = Min; AHi = Max;
                 }
             }
@@ -279,10 +275,6 @@ static BOOLEAN RootWindow(EFI_BOOT_SERVICES* BS, UINTN Seg, UINTN Bus, UINT64* L
         BS->FreePool(Res);
     }
     _INT_FreePool(BS, H);
-    if (PHi > PLo) {
-        *Lo = PLo; *Hi = PHi;
-        return TRUE;
-    }
     if (AHi > ALo) {
         *Lo = ALo; *Hi = AHi;
         return TRUE;
@@ -347,6 +339,7 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32
     Out->Gpu = 0;
     Out->WinFb = 0;
     Out->SizeFix = 0;
+    Out->CapMaxExp = 0;
     if (D == NULL || U == NULL)
         goto out;
 
@@ -381,6 +374,9 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32
     Ctrl = C32(G, Cap + 8 + 8 * Ent);
     Sizes = C32(G, Cap + 4 + 8 * Ent) >> 4;
     CurExp = (Ctrl >> 8) & 0x1F;
+    for (UINT32 n = 0; n < 28; n++)
+        if ((Sizes >> n) & 1u)
+            Out->CapMaxExp = n;                             // largest size the card supports (diagnostics)
     Out->OldExp = Out->NewExp = CurExp;
 
     // ---- 2. bridges above the Radeon (direct parent first, root port last) ----
