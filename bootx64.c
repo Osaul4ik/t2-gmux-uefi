@@ -1765,6 +1765,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             Rb.NewExp < Rb.CapMaxExp && (1u << Rb.NewExp) < gRebarMb)
             LOG(&gs, PR_REBAR, L"Resizable BAR: the card supports up to %d MB, window %lX-%lX%s",
                 (UINTN)(1u << Rb.CapMaxExp), Rb.WinLo, Rb.WinHi, Rb.WinFb ? L" (fallback)" : L"");
+        if (Rb.CapWiden == 1)
+            LOG(&gs, PR_REBAR, L"Resizable BAR: size list widened %lX -> %lX", (UINTN)Rb.CapOld, (UINTN)Rb.CapNew);
+        else if (Rb.CapWiden == 2)
+            LOG(&gs, PR_REBAR, L"Resizable BAR: size list could not be widened (%lX)", (UINTN)Rb.CapOld);
     }
 
     // ---- FakeSecureBoot (any mode, including 1): start the hook driver last, right before Windows ----

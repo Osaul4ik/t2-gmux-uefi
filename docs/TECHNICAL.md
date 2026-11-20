@@ -136,6 +136,15 @@ Steps (every PCI access is through `EFI_PCI_IO_PROTOCOL`, bridges included):
 
 The result is shown on screen only; no log file is written.
 
+**Size list of the card (Radeon Pro 5600M).** The ReBAR capability of this Navi 12 lists only 256 MB, 512 MB and 1 GB
+for BAR0 (config `capability + 4` = `0x00007000`), so nothing larger can be chosen however much room there is. The
+list is read-only in config space and follows the framebuffer aperture strap `STRAP_MEM_AP_SIZE_DEV0_F0`
+(`RCC_DEV0_EPF0_STRAP8`, bits 12:9; NBIO 2.3, see `nbio_2_3_offset.h` in the Linux kernel), which the Mac firmware
+leaves at 0. The loader reaches the strap through the register BAR (BAR5 + `(0xD20 + 0x18) * 4`), checks the mapping
+by the device id in `STRAP0`, raises the strap one step at a time until the list holds all the wanted sizes (three
+steps give 256 MB .. 8 GB: `0x0003F000`) and puts it back if the list does not grow or the resize does not happen.
+Progress line: `size list widened <old> -> <new>`.
+
 What is not known from the code alone and has to be seen on the machine: the size of the MMIO window above 4 GB
 that Apple's firmware gives the root bridge (`NO_FIT` prints it) and whether it matches what the DSDT builds from
 `M64B` / `M64L` (those are filled by the firmware at boot, not stored in the ACPI dump). If Windows' window is
@@ -361,6 +370,15 @@ Steps (every PCI access is through `EFI_PCI_IO_PROTOCOL`, bridges included):
    the old address), which is why the result line is the last thing printed before Windows.
 
 The result is shown on screen only; no log file is written.
+
+**Size list of the card (Radeon Pro 5600M).** The ReBAR capability of this Navi 12 lists only 256 MB, 512 MB and 1 GB
+for BAR0 (config `capability + 4` = `0x00007000`), so nothing larger can be chosen however much room there is. The
+list is read-only in config space and follows the framebuffer aperture strap `STRAP_MEM_AP_SIZE_DEV0_F0`
+(`RCC_DEV0_EPF0_STRAP8`, bits 12:9; NBIO 2.3, see `nbio_2_3_offset.h` in the Linux kernel), which the Mac firmware
+leaves at 0. The loader reaches the strap through the register BAR (BAR5 + `(0xD20 + 0x18) * 4`), checks the mapping
+by the device id in `STRAP0`, raises the strap one step at a time until the list holds all the wanted sizes (three
+steps give 256 MB .. 8 GB: `0x0003F000`) and puts it back if the list does not grow or the resize does not happen.
+Progress line: `size list widened <old> -> <new>`.
 
 What is not known from the code alone and has to be seen on the machine: the size of the MMIO window above 4 GB
 that Apple's firmware gives the root bridge (`NO_FIT` prints it) and whether it matches what the DSDT builds from

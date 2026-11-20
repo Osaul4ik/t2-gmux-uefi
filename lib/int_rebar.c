@@ -88,6 +88,78 @@ static VOID W16(RB_DEV* d, UINT32 off, UINT16 v)
     d->Io->Pci.Write(d->Io, EfiPciIoWidthUint16, off, 1, &v);
 }
 
+// ---- widening the size list (Radeon Pro 5600M / Navi 12) -----------------------------------------------------------
+// The size list of the Resizable BAR capability is read-only in config space and, for function 0 of NBIO 2.3 (Navi 10 /
+// 12 / 14), follows the framebuffer aperture strap STRAP_MEM_AP_SIZE_DEV0_F0 (RCC_DEV0_EPF0_STRAP8, bits 12:9). The Mac
+// firmware leaves it at 0, which lists 256 MB .. 1 GB only; each step up adds one size. The register BAR (BAR5) is
+// reached directly. Offsets from the kernel's nbio_2_3_offset.h / navi10_ip_offset.h (NBIO segment 2 = 0xD20 dwords).
+#define MM_STRAP0           ((0xD20u + 0x11u) * 4u)         // device id in bits 15:0 (proves the mapping)
+#define MM_STRAP8           ((0xD20u + 0x18u) * 4u)
+#define STRAP8_APSZ_SHIFT   9
+#define STRAP8_APSZ_MASK    0xFu
+#define STRAP_MAX_STEPS     4
+
+static volatile UINT8* gStrapBase;                          // non-NULL = STRAP8 was changed (original in gStrapOrig)
+static UINT32 gStrapOrig;
+
+static UINT32 MmR(volatile UINT8* Base, UINT32 Off)
+{
+    return *(volatile UINT32*)(Base + Off);
+}
+
+static VOID MmW(volatile UINT8* Base, UINT32 Off, UINT32 v)
+{
+    *(volatile UINT32*)(Base + Off) = v;
+}
+
+// Raise the aperture strap step by step until the size list (config Off) contains all the bits in Want (a mask in
+// size-list position, i.e. already shifted by 4). Nothing is left changed if the list never grows.
+static BOOLEAN WidenSizeList(RB_DEV* G, UINT32 Off, UINT32 Want)
+{
+    UINT32 Cmd = C16(G, PCI_CMD), Bar5 = C32(G, 0x24), S8, Ap, Cap0 = C32(G, Off);
+    volatile UINT8* Base;
+    BOOLEAN Forced = FALSE, Grew = FALSE;
+
+    if (G->Fn != 0 || G->Ven != 0x1002)
+        return FALSE;
+    if ((Bar5 & 1u) != 0 || ((Bar5 >> 1) & 3u) != 0 || (Bar5 & ~0xFu) == 0)    // not an assigned 32-bit memory BAR
+        return FALSE;
+    Base = (volatile UINT8*)(UINTN)(Bar5 & ~0xFu);
+    if (!(Cmd & PCI_CMD_MEM)) {
+        W16(G, PCI_CMD, (UINT16)(Cmd | PCI_CMD_MEM));
+        Forced = TRUE;
+    }
+    S8 = MmR(Base, MM_STRAP8);
+    Ap = (S8 >> STRAP8_APSZ_SHIFT) & STRAP8_APSZ_MASK;
+    if ((MmR(Base, MM_STRAP0) & 0xFFFF) == (C32(G, 0) >> 16) && S8 != 0xFFFFFFFFu) {
+        for (UINT32 Step = 1; Step <= STRAP_MAX_STEPS && Ap + Step <= STRAP8_APSZ_MASK; Step++) {
+            UINT32 Nv = (S8 & ~(STRAP8_APSZ_MASK << STRAP8_APSZ_SHIFT)) | ((Ap + Step) << STRAP8_APSZ_SHIFT);
+            UINT32 Cap;
+
+            MmW(Base, MM_STRAP8, Nv);
+            if (MmR(Base, MM_STRAP8) != Nv)
+                break;                                      // the strap does not take writes
+            for (UINT32 i = 0; i < 32; i++)
+                (VOID)C32(G, Off);                          // settle
+            Cap = C32(G, Off);
+            if (Cap != Cap0 && (Cap & Cap0) == Cap0) {
+                Grew = TRUE;
+                if ((Cap & Want) == Want)
+                    break;
+            }
+        }
+        if (Grew) {
+            gStrapBase = Base;
+            gStrapOrig = S8;
+        } else {
+            MmW(Base, MM_STRAP8, S8);
+        }
+    }
+    if (Forced)
+        W16(G, PCI_CMD, (UINT16)Cmd);
+    return Grew;
+}
+
 static UINTN Enumerate(EFI_BOOT_SERVICES* BS, EFI_HANDLE Image, RB_DEV* D, UINTN Max)
 {
     EFI_GUID guid = EFI_PCI_IO_PROTOCOL_GUID;
@@ -330,6 +402,7 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32
     UINTN NC = 0;
     UINT32 Cap = 0, Ent = 0, Ctrl = 0, Sizes = 0, CurExp = 0;
     UINT32 Code = _INT_REBAR_ERR;
+    UINT32 CapOff = 0;
     BOOLEAN HaveGpu = FALSE;
 
     Out->Code = _INT_REBAR_ERR;
@@ -340,6 +413,9 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32
     Out->WinFb = 0;
     Out->SizeFix = 0;
     Out->CapMaxExp = 0;
+    Out->CapWiden = 0;
+    Out->CapOld = Out->CapNew = 0;
+    gStrapBase = NULL;
     if (D == NULL || U == NULL)
         goto out;
 
@@ -378,6 +454,29 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32
         if ((Sizes >> n) & 1u)
             Out->CapMaxExp = n;                             // largest size the card supports (diagnostics)
     Out->OldExp = Out->NewExp = CurExp;
+
+    // The size list of this card stops at 1 GB (the firmware's aperture strap is 0): widen it to what is wanted.
+    CapOff = Cap + 4 + 8 * Ent;
+    {
+        UINT32 Top = MaxExp(MaxMb), Want = 0;
+
+        for (UINT32 n = Out->CapMaxExp + 1; n <= Top && n < 28; n++)
+            Want |= 1u << (n + 4);
+        if (Want != 0) {
+            Out->CapOld = C32(G, CapOff);
+            if (WidenSizeList(G, CapOff, Want)) {
+                Out->CapNew = C32(G, CapOff);
+                Out->CapWiden = 1;
+                Sizes = Out->CapNew >> 4;
+                for (UINT32 n = 0; n < 28; n++)
+                    if ((Sizes >> n) & 1u)
+                        Out->CapMaxExp = n;
+            } else {
+                Out->CapNew = Out->CapOld;
+                Out->CapWiden = 2;
+            }
+        }
+    }
 
     // ---- 2. bridges above the Radeon (direct parent first, root port last) ----
     {
@@ -623,6 +722,11 @@ EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32
     }
 
 out:
+    if (gStrapBase != NULL && Code != _INT_REBAR_OK) {          // nothing was resized: the strap goes back too
+        MmW(gStrapBase, MM_STRAP8, gStrapOrig);
+        Out->CapWiden = 2;
+    }
+    gStrapBase = NULL;
     Out->Code = Code;
     if (D != NULL)
         _INT_FreePool(BS, D);

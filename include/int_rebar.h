@@ -53,13 +53,16 @@ typedef struct {
     UINT32  Gpu;            // bus:dev.fn of the Radeon (bus<<8 | dev<<3 | fn)
     UINT32  WinFb;          // 1 = the root bridge reported no window above 4 GB, the built-in fallback window was used
     UINT32  SizeFix;        // prefetchable BARs whose real (probed) size differed from the bus driver's number (shown on screen)
-    UINT32  CapMaxExp;      // largest BAR0 size the card supports, 2^(20+n) (diagnostics)
+    UINT32  CapMaxExp;      // largest BAR0 size the card supports, 2^(20+n) (after the size list was widened, if it was)
+    UINT32  CapWiden;       // size list of the capability: 0 = not needed / not tried, 1 = widened, 2 = could not be widened
+    UINT32  CapOld;         // size list dword (config, capability + 4) before and after, raw
+    UINT32  CapNew;
 } _INT_RebarResult;
 
 // Resize BAR0 of the Radeon to the largest size that is supported and fits, re-place its prefetchable BARs
 // and the prefetchable windows of the bridges above it, re-point the GOP framebuffer. Boot Services only.
 // Everything is verified; on any mismatch the old values are written back.
-// MaxMb = largest BAR0 size wanted in MB (a power of two, 256..4096); 0 = the built-in maximum.
+// MaxMb = largest BAR0 size wanted in MB (a power of two, 256..8192); 0 = the built-in maximum.
 EFI_STATUS _INT_RebarApply(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, UINT32 MaxMb, _INT_RebarResult* Out);
 
 #endif
